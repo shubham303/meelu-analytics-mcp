@@ -1,0 +1,4 @@
+# Every change to this repository requires review from the owner.
+# Combined with branch protection on `main`, this means no pull request
+# can be merged without @shubham303 signing off on it.
+*       @shubham303
