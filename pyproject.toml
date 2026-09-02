@@ -1,0 +1,52 @@
+# Meelu analytics — the data-analysis hand, in Python.
+#
+# Ported from TableIntelligence (same author, Apache-2.0): the deterministic
+# single-table analysis engine (DuckDB/ibis workspace, ~30 analytics tools,
+# session persistence) exposed as a standalone MCP server over streamable
+# HTTP (default http://127.0.0.1:8321/mcp; pass --stdio for stdio).
+#
+# Run with `uv run --project <this dir> meelu-analytics-mcp`, which resolves
+# and installs these dependencies on first run — that IS the install step;
+# there is no separate setup.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meelu-analytics-mcp"
+version = "0.1.0"
+description = "Meelu analytics — deterministic single-table data analysis as a standalone MCP server over streamable HTTP."
+requires-python = ">=3.10"
+authors = [{ name = "Shubham Randive" }]
+dependencies = [
+    "ibis-framework[duckdb]",
+    "pandas",
+    "numpy",
+    "pydantic>=2",
+    "scipy",
+    "scikit-learn",
+    "statsmodels",
+    "shap",
+    # shap pulls in numba without a lower bound; without this floor the resolver
+    # picks numba 0.53 / llvmlite 0.36, which only support Python < 3.10 and
+    # break installs on 3.12+. 0.59 is the first numba with 3.12 wheels.
+    "numba>=0.59",
+    # 2.x removed mcp.server.fastmcp (FastMCP became its own package); the
+    # server is written against the 1.x SDK.
+    "mcp>=1.10,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+# Insight-extraction primitives, imported lazily where used:
+#   mlxtend  → market_basket (association rules)
+#   dowhy    → causal_effect (backdoor estimation + refutation)
+#   ruptures → detect_changepoints (time-series change detection)
+insights = ["mlxtend", "dowhy", "ruptures"]
+
+[project.scripts]
+meelu-analytics-mcp = "tabint.app.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
