@@ -19,6 +19,8 @@ version = "0.1.0"
 description = "Meelu analytics — deterministic single-table data analysis as a standalone MCP server over streamable HTTP."
 requires-python = ">=3.10"
 authors = [{ name = "Shubham Randive" }]
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "ibis-framework[duckdb]",
     "pandas",
