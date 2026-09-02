@@ -19,6 +19,21 @@ claude mcp add --transport http meelu-analytics http://127.0.0.1:8321/mcp
 
 → **[Getting started](docs/getting-started.md)** for the full setup.
 
+## What it looks like
+
+Ask a question in plain language. The agent drives the tools; the engine decides
+the method and reports how much to trust the answer.
+
+<p align="center">
+  <img src="docs/assets/example-chat.svg" alt="A chat exchange: the user asks which customer tier drives revenue and whether the difference is real. The agent calls create_session, join, profile and analyze_association; the engine detects that normality failed and routes to a Kruskal-Wallis test, then returns a revenue-by-tier table with a trust block reading 'trust: high, n=4,812, declined: false'." width="900">
+</p>
+
+Note what the caller never had to decide: which test to run. `tier` is
+categorical and `revenue` is continuous with four groups, so the routing is
+determined — and because the per-group normality check failed, it lands on
+Kruskal-Wallis rather than a one-way ANOVA. The result records that reasoning, in
+case someone asks six months later.
+
 ## Documentation
 
 | Guide | What's in it |

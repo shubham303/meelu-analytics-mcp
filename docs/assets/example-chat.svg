@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="632" viewBox="0 0 900 632" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    .bg    { fill:#ffffff; }
+    .chrome{ fill:#f6f8fa; }
+    .rule  { stroke:#d8dee4; stroke-width:1; fill:none; }
+    .title { fill:#57606a; font-size:12px; }
+    .user  { fill:#1f2328; font-size:15px; font-weight:600; }
+    .txt   { fill:#1f2328; font-size:13.5px; }
+    .dim   { fill:#57606a; font-size:12.5px; }
+    .mono  { font-family:'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size:12px; }
+    .tool  { fill:#0969da; }
+    .th    { fill:#57606a; font-size:11.5px; font-weight:600; letter-spacing:.04em; }
+    .td    { fill:#1f2328; font-size:12.5px; }
+    .tdn   { font-family:'SFMono-Regular', Consolas, Menlo, monospace; font-size:12.5px; fill:#1f2328; }
+    .good  { fill:#1a7f37; font-size:11.5px; font-weight:600; }
+    .warn  { fill:#9a6700; font-size:11.5px; font-weight:600; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="900" height="632" rx="10"/>
+  <rect class="chrome" x="0" y="0" width="900" height="38" rx="10"/>
+  <rect class="chrome" x="0" y="28" width="900" height="10"/>
+  <line class="rule" x1="0" y1="38" x2="900" y2="38"/>
+  <rect x="0.5" y="0.5" width="899" height="631" rx="10" class="rule"/>
+  <circle cx="20" cy="19" r="5" fill="#ff5f57"/>
+  <circle cx="38" cy="19" r="5" fill="#febc2e"/>
+  <circle cx="56" cy="19" r="5" fill="#28c840"/>
+  <text class="title" x="78" y="23">meelu-analytics  ·  MCP  ·  connected</text>
+
+  <!-- user turn -->
+  <rect x="24" y="60" width="4" height="42" rx="2" fill="#8250df"/>
+  <text class="user" x="44" y="76">Which customer tier actually drives revenue — and is the</text>
+  <text class="user" x="44" y="96">difference real, or just noise?</text>
+
+  <!-- tool calls -->
+  <text class="mono tool" x="44" y="130">⏺ create_session(paths=["orders.csv", "customers.csv"])</text>
+  <text class="mono dim"  x="60" y="148">↳ session s_a1b2c3 · 2 tables · 1 relationship detected</text>
+  <text class="mono tool" x="44" y="172">⏺ join(tables=["orders","customers"])  ⏺ profile(...)</text>
+  <text class="mono dim"  x="60" y="190">↳ orders_customers · 4,812 rows · 14 columns</text>
+  <text class="mono tool" x="44" y="214">⏺ analyze_association(col_a="tier", col_b="revenue")</text>
+  <text class="mono dim"  x="60" y="232">↳ normality failed → routed to Kruskal-Wallis</text>
+
+  <!-- answer -->
+  <text class="txt" x="44" y="266">Revenue differs significantly across tier. Because the per-group distributions</text>
+  <text class="txt" x="44" y="285">failed the normality check, the engine ran a <tspan font-weight="600">Kruskal-Wallis</tspan> test rather than</text>
+  <text class="txt" x="44" y="304">a one-way ANOVA — H = 41.2, p &lt; 0.001, ε² = 0.18 (a moderate effect).</text>
+
+  <!-- table -->
+  <rect x="44" y="322" width="812" height="150" rx="6" class="rule"/>
+  <line class="rule" x1="44" y1="350" x2="856" y2="350"/>
+  <line class="rule" x1="44" y1="380" x2="856" y2="380"/>
+  <line class="rule" x1="44" y1="410" x2="856" y2="410"/>
+  <line class="rule" x1="44" y1="440" x2="856" y2="440"/>
+  <rect x="44" y="322.5" width="812" height="27.5" rx="6" fill="#f6f8fa"/>
+  <rect x="44" y="336" width="812" height="14" fill="#f6f8fa"/>
+
+  <text class="th" x="60"  y="341">TIER</text>
+  <text class="th" x="230" y="341">CUSTOMERS</text>
+  <text class="th" x="330" y="341">MEDIAN REVENUE</text>
+  <text class="th" x="500" y="341">SHARE OF TOTAL</text>
+  <text class="th" x="670" y="341">VS. OVERALL</text>
+
+  <text class="td"  x="60"  y="370">Premium</text>
+  <text class="tdn" x="230" y="370">412</text>
+  <text class="tdn" x="330" y="370">£890.40</text>
+  <text class="tdn" x="500" y="370">47.1%</text>
+  <text class="good" x="670" y="370">+187%</text>
+
+  <text class="td"  x="60"  y="400">Standard</text>
+  <text class="tdn" x="230" y="400">2,106</text>
+  <text class="tdn" x="330" y="400">£310.80</text>
+  <text class="tdn" x="500" y="400">38.4%</text>
+  <text class="dim" x="670" y="400" font-weight="600">+0.2%</text>
+
+  <text class="td"  x="60"  y="430">Basic</text>
+  <text class="tdn" x="230" y="430">1,884</text>
+  <text class="tdn" x="330" y="430">£118.25</text>
+  <text class="tdn" x="500" y="430">12.9%</text>
+  <text class="warn" x="670" y="430">−62%</text>
+
+  <text class="td"  x="60"  y="460">Trial</text>
+  <text class="tdn" x="230" y="460">410</text>
+  <text class="tdn" x="330" y="460">£24.10</text>
+  <text class="tdn" x="500" y="460">1.6%</text>
+  <text class="warn" x="670" y="460">−92%</text>
+
+  <!-- trust block -->
+  <rect x="44" y="492" width="812" height="60" rx="6" fill="#f6f8fa" stroke="#d8dee4"/>
+  <rect x="44" y="492" width="4" height="60" rx="2" fill="#1a7f37"/>
+  <text class="dim" x="64" y="514"><tspan font-weight="700" fill="#1a7f37">trust: high</tspan>   ·   basis: n=4,812   ·   assumptions: normality failed, variances unequal   ·   declined: false</text>
+  <text class="dim" x="64" y="534">No caveats. Effect size is reported alongside the p-value — with 4,812 rows, significance alone would prove little.</text>
+
+  <!-- footer note -->
+  <text class="dim" x="44" y="578">Premium is 8.6% of customers and 47% of revenue. Worth noting this is an association, not a cause:</text>
+  <text class="dim" x="44" y="597">moving a customer to Premium would not create the spend. For that question, ask <tspan class="mono" fill="#0969da">causal_effect</tspan>.</text>
+</svg>
