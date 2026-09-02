@@ -12,13 +12,6 @@ data's shape — checking normality, variance, and cell counts first — then re
 which test it chose and why. Every result also says how much to trust it, and
 refuses to answer when the data cannot support the question.
 
-```bash
-uv run --project . meelu-analytics-mcp
-claude mcp add --transport http meelu-analytics http://127.0.0.1:8321/mcp
-```
-
-→ **[Getting started](docs/getting-started.md)** for the full setup.
-
 ## What it looks like
 
 Ask a question in plain language. The agent drives the tools; the engine decides
@@ -33,6 +26,119 @@ categorical and `revenue` is continuous with four groups, so the routing is
 determined — and because the per-group normality check failed, it lands on
 Kruskal-Wallis rather than a one-way ANOVA. The result records that reasoning, in
 case someone asks six months later.
+
+## Quickstart
+
+Four steps: start the server, connect your agent, put a CSV where the engine can
+read it, then ask in English.
+
+### 1. Start the server
+
+Requires Python ≥ 3.10 and [`uv`](https://docs.astral.sh/uv/). There is no
+separate install step — `uv run` resolves and installs dependencies on the first
+invocation.
+
+```bash
+git clone https://github.com/shubham303/meelu-analytics-mcp.git
+cd meelu-analytics-mcp
+
+# This directory is both where sessions are saved AND the only place the
+# engine may read data files from. Pick somewhere stable.
+export TABULAR_BASE="$HOME/meelu-data"
+mkdir -p "$TABULAR_BASE"
+
+uv run --project . meelu-analytics-mcp
+# → meelu-analytics-mcp listening on http://127.0.0.1:8321/mcp
+```
+
+Leave it running, and use a second terminal for the next steps.
+
+### 2. Connect your agent
+
+**Claude Code** — from the directory you want to work in:
+
+```bash
+claude mcp add --transport http meelu-analytics http://127.0.0.1:8321/mcp
+```
+
+Then start `claude` and run `/mcp` to confirm `meelu-analytics` is connected.
+
+<details>
+<summary><b>Claude Desktop, Cursor, and other clients</b></summary>
+
+Most clients read a JSON config. Point them at the same URL:
+
+```json
+{
+  "mcpServers": {
+    "meelu-analytics": {
+      "type": "http",
+      "url": "http://127.0.0.1:8321/mcp"
+    }
+  }
+}
+```
+
+For a client that prefers to launch the server itself over stdio:
+
+```json
+{
+  "mcpServers": {
+    "meelu-analytics": {
+      "command": "uv",
+      "args": ["run", "--project", "/absolute/path/to/meelu-analytics-mcp",
+               "meelu-analytics-mcp", "--stdio"],
+      "env": { "TABULAR_BASE": "/absolute/path/to/your/data" }
+    }
+  }
+}
+```
+
+</details>
+
+### 3. Put your CSV where the engine can read it
+
+**This is the step people miss.** The engine is sandboxed to `TABULAR_BASE` — it
+cannot read `~/Downloads`, your desktop, or anywhere else, and it will return an
+`outside_data_dir` error naming the directory it *is* allowed to use.
+
+```bash
+cp ~/Downloads/orders.csv "$TABULAR_BASE"/
+```
+
+Copy in as many files as you like. Related tables can go in together — the engine
+detects foreign keys between them on ingest. Why the sandbox exists:
+[the data directory boundary](docs/configuration.md#the-data-directory-boundary).
+
+### 4. Ask
+
+Now just talk to your agent. You do not call the tools yourself — it does.
+
+> Load `~/meelu-data/orders.csv` with meelu and profile it. What's in this data?
+
+> Using meelu, is there a real relationship between `discount` and `return_rate`
+> in orders.csv? Tell me which test it ran and why.
+
+> Load orders.csv and customers.csv with meelu, join them, and tell me what
+> predicts churn. Report the held-out metrics, not the training ones.
+
+Mentioning **meelu** on the first request is usually enough to steer the agent to
+these tools rather than writing its own pandas script. After that it will keep
+using the session it created.
+
+A few things worth asking for explicitly, because they are where this server
+differs from an agent improvising:
+
+- *"Which test did it choose, and what assumptions failed?"* — the routing is
+  recorded in every result.
+- *"What's the trust level?"* — and if a tool declined, that refusal is the
+  answer. Do not let an agent paper over it with an estimate.
+- *"Is that causal or just correlation?"* — most of these tools measure
+  association. Only `causal_effect` attempts more, and it is honest about its
+  limits.
+
+→ **[Getting started](docs/getting-started.md)** covers the same ground in more
+detail, including column typing and how to read a result.
 
 ## Documentation
 
