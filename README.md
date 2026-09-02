@@ -1,72 +1,107 @@
 # meelu-analytics-mcp
 
-**Deterministic single-table data analysis as a standalone MCP server.**
+**Ask your AI assistant real questions about your data — and get answers you can
+actually rely on.**
 
-Load CSVs into a DuckDB-backed session, then run profiling, statistical tests,
-feature engineering, machine learning, forecasting, and causal inference through
-45 MCP tools — from Claude Code, or any MCP client.
+You have a spreadsheet. You want to know what's in it, what's driving a number,
+who your best customers are, where things are heading. So you ask Claude.
 
-The point is the *determinism*. You do not ask for a Pearson correlation; you ask
-whether two columns are associated, and the engine picks the correct test from the
-data's shape — checking normality, variance, and cell counts first — then records
-which test it chose and why. Every result also says how much to trust it, and
-refuses to answer when the data cannot support the question.
+Today it will write a little program on the spot and give you an answer. Usually
+that's fine. When it isn't, you can't tell: it might have used the wrong kind of
+test for your data, or graded its own prediction on the same rows it learned
+from, or told you one thing causes another when it only happens alongside it. The
+answer looks equally confident either way.
+
+This tool sits between your assistant and your data and takes those judgement
+calls out of its hands. You ask the question in plain English; a proper analysis
+engine works out the right method from your actual data, runs it, and tells you
+how much to trust the result — or says the data can't answer the question, rather
+than making something up.
 
 ## What it looks like
 
-Ask a question in plain language. The agent drives the tools; the engine decides
-the method and reports how much to trust the answer.
-
 <p align="center">
-  <img src="docs/assets/example-chat.svg" alt="A chat exchange: the user asks which customer tier drives revenue and whether the difference is real. The agent calls create_session, join, profile and analyze_association; the engine detects that normality failed and routes to a Kruskal-Wallis test, then returns a revenue-by-tier table with a trust block reading 'trust: high, n=4,812, declined: false'." width="900">
+  <img src="docs/assets/example-chat.svg" alt="A chat exchange: the user asks which customer tier drives revenue and whether the difference is real. The assistant loads the files, joins them, and runs an association test; the engine finds the data isn't normally distributed and switches to a Kruskal-Wallis test, then returns a revenue-by-tier table with a trust rating of 'high' based on 4,812 rows." width="900">
 </p>
 
-Note what the caller never had to decide: which test to run. `tier` is
-categorical and `revenue` is continuous with four groups, so the routing is
-determined — and because the per-group normality check failed, it lands on
-Kruskal-Wallis rather than a one-way ANOVA. The result records that reasoning, in
-case someone asks six months later.
+You asked a question. You didn't have to know that comparing four groups against
+a revenue figure calls for a particular statistical test, or that this data broke
+the assumptions of the obvious one and needed a different test instead. That was
+worked out from the data, and written down in the answer — so if someone asks six
+months from now how you got that number, it's on the record.
 
-## Quickstart
+## What you can ask
 
-Four steps: start the server, connect your agent, put a CSV where the engine can
-read it, then ask in English.
+There are 45 tools under the hood, but you never call them. You ask; your
+assistant picks. In practice that means questions like:
 
-### 1. Start the server
+| You ask | What you get back |
+|---|---|
+| *"What's in this file?"* | Every column explained — what kind of data it holds, what's missing, what's typical, and which "numbers" are really just ID codes |
+| *"Are these two things related?"* | A real statistical test, chosen to suit your data — and how big the relationship is, not just whether it's detectable |
+| *"What's driving revenue?"* | The factors that matter most, ranked, plus plain rules you can act on: *"highest among premium customers who've been with us over 18 months"* |
+| *"Do my customers fall into groups?"* | Natural segments found in the data, each described so you can tell what makes it distinct |
+| *"What predicts churn?"* | A prediction model, scored honestly on data it was never shown, plus what it's really paying attention to |
+| *"Where is this heading?"* | The underlying trend separated from seasonal ups and downs, a forecast with honest margins of error, and the dates when behaviour shifted |
+| *"Did the price change cause this?"* | A genuine attempt at cause and effect — put through a sanity check, and withheld entirely if it fails |
+| *"Who are my best customers?"* | Customer segments by how recently and often they buy, how well you retain them over time, and what tends to get bought together |
 
-Requires Python ≥ 3.10 and [`uv`](https://docs.astral.sh/uv/). There is no
-separate install step — `uv run` resolves and installs dependencies on the first
-invocation.
+Related files can be analysed together, and anything the built-in tools don't
+cover, you can ask for directly — it becomes part of the same analysis.
+
+## Getting set up
+
+This is a one-time setup. You'll need to use **Terminal** (on Mac: press `⌘ Space`,
+type "Terminal", hit enter) and copy-paste a few commands. After that you never
+touch it again — you just talk to your assistant.
+
+**Before you start**, you need two things installed:
+[Python](https://www.python.org/downloads/) version 3.10 or newer, and a tool
+called [`uv`](https://docs.astral.sh/uv/getting-started/installation/) that
+handles everything else automatically.
+
+### Step 1 — Download and start it
+
+Copy this whole block into Terminal and press enter:
 
 ```bash
 git clone https://github.com/shubham303/meelu-analytics-mcp.git
 cd meelu-analytics-mcp
 
-# This directory is both where sessions are saved AND the only place the
-# engine may read data files from. Pick somewhere stable.
+mkdir -p "$HOME/meelu-data"
 export TABULAR_BASE="$HOME/meelu-data"
-mkdir -p "$TABULAR_BASE"
 
 uv run --project . meelu-analytics-mcp
-# → meelu-analytics-mcp listening on http://127.0.0.1:8321/mcp
 ```
 
-Leave it running, and use a second terminal for the next steps.
+The first run takes a minute while it downloads what it needs. When you see:
 
-### 2. Connect your agent
+```
+meelu-analytics-mcp listening on http://127.0.0.1:8321/mcp
+```
 
-**Claude Code** — from the directory you want to work in:
+it's working. **Leave this window open** — closing it switches the tool off. Open
+a new Terminal window (`⌘ N`) for the next step.
+
+That `meelu-data` folder it just made in your home directory is where your data
+goes. More on that in step 3.
+
+### Step 2 — Connect your assistant
+
+**Claude Code** — paste this into the new Terminal window:
 
 ```bash
 claude mcp add --transport http meelu-analytics http://127.0.0.1:8321/mcp
 ```
 
-Then start `claude` and run `/mcp` to confirm `meelu-analytics` is connected.
+To check it worked, start Claude with `claude`, then type `/mcp`. You should see
+`meelu-analytics` listed as connected.
 
 <details>
-<summary><b>Claude Desktop, Cursor, and other clients</b></summary>
+<summary><b>Using Claude Desktop, Cursor, or something else?</b></summary>
 
-Most clients read a JSON config. Point them at the same URL:
+These apps have a settings file where you list tools like this one. Add this
+entry to it:
 
 ```json
 {
@@ -79,7 +114,8 @@ Most clients read a JSON config. Point them at the same URL:
 }
 ```
 
-For a client that prefers to launch the server itself over stdio:
+Some apps prefer to start the tool themselves, in which case you can skip step 1
+entirely and use this instead — replacing both paths with real ones:
 
 ```json
 {
@@ -96,51 +132,76 @@ For a client that prefers to launch the server itself over stdio:
 
 </details>
 
-### 3. Put your CSV where the engine can read it
+### Step 3 — Put your spreadsheet in the data folder
 
-**This is the step people miss.** The engine is sandboxed to `TABULAR_BASE` — it
-cannot read `~/Downloads`, your desktop, or anywhere else, and it will return an
-`outside_data_dir` error naming the directory it *is* allowed to use.
+**Don't skip this one.** For safety, the tool can only see inside that one
+`meelu-data` folder — not your Downloads, not your Desktop, nowhere else on your
+computer. If your file isn't in there, it simply won't be found.
+
+So drag your CSV file into the `meelu-data` folder in your home folder (in
+Finder: `⌘ ⇧ H`, then open `meelu-data`). Or from Terminal:
 
 ```bash
-cp ~/Downloads/orders.csv "$TABULAR_BASE"/
+cp ~/Downloads/orders.csv ~/meelu-data/
 ```
 
-Copy in as many files as you like. Related tables can go in together — the engine
-detects foreign keys between them on ingest. Why the sandbox exists:
-[the data directory boundary](docs/configuration.md#the-data-directory-boundary).
+Put in as many files as you like. If several of them are related — orders and
+customers, say — the tool will spot how they connect on its own.
 
-### 4. Ask
+*Working with Excel? Save as CSV first: File → Save As → CSV.*
 
-Now just talk to your agent. You do not call the tools yourself — it does.
+### Step 4 — Just ask
 
-> Load `~/meelu-data/orders.csv` with meelu and profile it. What's in this data?
+That's it. Talk to your assistant normally:
 
-> Using meelu, is there a real relationship between `discount` and `return_rate`
-> in orders.csv? Tell me which test it ran and why.
+> Using meelu, load orders.csv and tell me what's in it.
 
-> Load orders.csv and customers.csv with meelu, join them, and tell me what
-> predicts churn. Report the held-out metrics, not the training ones.
+> Using meelu, is there a real relationship between the discount we gave and
+> whether the order came back? And which test did it use?
 
-Mentioning **meelu** on the first request is usually enough to steer the agent to
-these tools rather than writing its own pandas script. After that it will keep
-using the session it created.
+> Using meelu, load orders.csv and customers.csv, put them together, and tell me
+> what predicts whether a customer leaves.
 
-A few things worth asking for explicitly, because they are where this server
-differs from an agent improvising:
+Saying **"using meelu"** the first time steers your assistant to this tool
+instead of improvising its own answer. After that it'll carry on using it.
 
-- *"Which test did it choose, and what assumptions failed?"* — the routing is
-  recorded in every result.
-- *"What's the trust level?"* — and if a tool declined, that refusal is the
-  answer. Do not let an agent paper over it with an estimate.
-- *"Is that causal or just correlation?"* — most of these tools measure
-  association. Only `causal_effect` attempts more, and it is honest about its
-  limits.
+Three follow-ups worth having in your back pocket, because they're where this
+tool earns its keep:
 
-→ **[Getting started](docs/getting-started.md)** covers the same ground in more
-detail, including column typing and how to read a result.
+- **"Which test did it use, and why?"** — there's always an answer, and it's
+  recorded.
+- **"How much should I trust this?"** — every result carries a rating. If the
+  tool refused to answer, *that's the answer* — don't let your assistant fill the
+  gap with a guess.
+- **"Is that actually causing it, or just related?"** — almost always the latter,
+  and the difference matters enormously before you act on it.
+
+→ **[Getting started](docs/getting-started.md)** walks through the same ground in
+more depth.
+
+## Why it's built this way
+
+Three decisions do most of the work.
+
+**The method is chosen from your data, not guessed at.** Comparing groups against
+a number is usually one particular test — unless your data doesn't meet that
+test's assumptions, in which case it needs a different one, and the difference
+changes the answer. That check runs every single time, and what it found is
+reported alongside the result.
+
+**It's willing to say no.** Too few rows to be meaningful. A prediction that
+would be graded on the rows it learned from. A cause-and-effect claim that fails
+its own sanity check. In each case you get a plain explanation instead of a
+number. A refusal tells you something true; a confident wrong answer doesn't.
+
+**Your work builds up.** Segments, predictions, and any new columns you create
+get saved back alongside your data, so each question builds on the last instead
+of starting from scratch. It all survives shutting down and coming back
+tomorrow.
 
 ## Documentation
+
+The technical details, for when you want them:
 
 | Guide | What's in it |
 |---|---|
@@ -164,51 +225,38 @@ detail, including column typing and how to read a result.
 - [Drivers & causal inference](docs/tools/drivers-and-causal.md)
 - [Customer analytics](docs/tools/customer-analytics.md) — basket, RFM, cohorts
 
-## What you get
-
-- **45 MCP tools** over one coherent session model — data is uploaded once and
-  never re-sent.
-- **Deterministic method selection.** Test and algorithm choice follows from
-  dtypes and assumption checks, not from an agent's guess.
-- **Refusals over fabrications.** Under 30 rows, a single-valued treatment, a
-  failed placebo test — the tool declines with a reason instead of returning a
-  meaningless number.
-- **Everything writes back.** Cluster labels, predictions, engineered features,
-  PCA components all become real columns, usable by later tools and SQL.
-- **In-database by default.** DuckDB/ibis does the work; nothing streams through
-  the app that doesn't have to.
+Built on DuckDB, scikit-learn, statsmodels, SHAP and DoWhy. Runs entirely on your
+own machine — your data never leaves it.
 
 ## Roadmap
 
-Phases are ordered so each makes the next more useful. ✅ ships today.
+Everything below ships today.
 
-| Phase | Scope | Status |
-|---|---|---|
-| 0 | Foundation — workspace, `Result`, dtype validation, sessions, persistence | ✅ |
-| 1 | Descriptive — `profile`, `detect_outliers`, `association_matrix` | ✅ |
-| 2 | Association — dtype-driven test routing (the flagship) | ✅ |
-| 3 | Clustering — `cluster`, `profile_clusters`, write-back machinery | ✅ |
-| 4 | Supervised — train / evaluate / predict, plus the job model | ✅ |
-| 5 | Interpretation — `feature_importance`, `explain_prediction` | ✅ |
-| 6 | Dimensionality reduction — PCA, t-SNE, UMAP | ✅ |
-| 7 | Time series — decompose, forecast, changepoints, period comparison | ✅ |
-| 8 | Insights — causal effects, key drivers, basket, RFM, cohorts | ✅ |
-| 9 | MCP surface — standalone streamable-HTTP server | ✅ |
+| | Capability |
+|---|---|
+| ✅ | **Explore** — summarise any file, flag unusual values, scan for relationships |
+| ✅ | **Test** — statistical tests chosen automatically from the data's shape |
+| ✅ | **Segment** — find natural groupings and describe what makes each distinct |
+| ✅ | **Predict** — train models, score them honestly, explain what drives them |
+| ✅ | **Forecast** — separate trend from seasonality, project forward, find turning points |
+| ✅ | **Explain** — rank what's driving a number; estimate cause and effect |
+| ✅ | **Customers** — retention cohorts, RFM segments, market basket analysis |
+| ✅ | **Build** — engineer new columns, clean messy tables, query with SQL |
 
-### Next
+### Coming next
 
-- **Large-data strategies** — sampling, out-of-core execution, approximate
-  methods, so the engine degrades gracefully instead of refusing.
-- **PyPI distribution** — `uvx meelu-analytics-mcp` with no local checkout.
-- **Broader ingest** — Parquet and JSON alongside CSV; connector-fed tables.
-- **Richer trust assessment** — replace the remaining `unassessed` results with
-  real, method-specific confidence.
-- **Multi-table analytics** — reduce the reliance on an explicit `join` step.
+- **Bigger files** — sampling and out-of-memory strategies, so large data degrades
+  gracefully rather than being refused.
+- **One-command install** — no cloning, no terminal setup.
+- **More file types** — Excel, Parquet and JSON alongside CSV.
+- **Better trust ratings** — real confidence assessments everywhere they're still
+  missing.
+- **Fewer manual steps** — analysing related files without joining them by hand.
 
-### Deliberately out of scope
+### Deliberately not doing
 
-Publishing, reporting, and external connectors. This engine computes; something
-else decides what to do with the answer.
+Dashboards, reports, and connecting to your other systems. This is the analysis
+engine; what you do with the answer is up to you.
 
 ## Contributing
 
