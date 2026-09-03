@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.shubham303/meelu-analytics-mcp",
+  "title": "Meelu Analytics",
+  "description": "Deterministic analysis of tabular data: picks the right statistical test and rates its trust",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/shubham303/meelu-analytics-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/shubham303/meelu-analytics-mcp",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "meelu-analytics-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--stdio",
+          "isRequired": true,
+          "description": "Run over stdio instead of the default streamable HTTP transport."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "TABULAR_BASE",
+          "description": "Directory holding your data files and persisted sessions. This is the only directory the server is permitted to read from.",
+          "isRequired": true,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

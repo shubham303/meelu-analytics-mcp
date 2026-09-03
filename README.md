@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.shubham303/meelu-analytics-mcp -->
+
 # meelu-analytics-mcp
 
 **Ask your AI assistant real questions about your data — and get answers you can

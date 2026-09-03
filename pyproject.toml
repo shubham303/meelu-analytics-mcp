@@ -21,6 +21,14 @@ requires-python = ">=3.10"
 authors = [{ name = "Shubham Randive" }]
 license = "MIT"
 license-files = ["LICENSE"]
+readme = "README.md"
+keywords = ["mcp", "model-context-protocol", "data-analysis", "statistics", "analytics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "ibis-framework[duckdb]",
     "pandas",
@@ -38,6 +46,12 @@ dependencies = [
     # server is written against the 1.x SDK.
     "mcp>=1.10,<2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/shubham303/meelu-analytics-mcp"
+Documentation = "https://github.com/shubham303/meelu-analytics-mcp/tree/main/docs"
+Source = "https://github.com/shubham303/meelu-analytics-mcp"
+Issues = "https://github.com/shubham303/meelu-analytics-mcp/issues"
 
 [project.optional-dependencies]
 dev = ["pytest"]
