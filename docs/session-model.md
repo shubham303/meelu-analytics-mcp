@@ -28,7 +28,8 @@ Each CSV becomes a table named after the file. Ingest also runs foreign-key
 detection across the uploaded tables, so the relationships come back in the same
 response.
 
-Every path must resolve inside the engine's data root — see
+Paths may point anywhere this process can read; the rows are copied into the
+session's database on load — see
 [the data directory boundary](configuration.md#the-data-directory-boundary).
 
 ### 2. Work

@@ -108,7 +108,8 @@ pull one.
 ## The data boundary
 
 The workspace is confined to `TABULAR_BASE` at startup and the key is discarded,
-so no SQL can read outside it. `tools.py` checks paths in front of that and
-returns a readable error, because the enforcement layer's own message tells a
-model nothing useful. See
+so no SQL can read outside it. Ingest sits outside that boundary by design:
+`tools.py` stages a CSV from any readable path into `<root>/.staging`, loads it,
+and deletes the copy — the rows end up in DuckDB and the allow-list is never
+widened. See
 [the data directory boundary](configuration.md#the-data-directory-boundary).

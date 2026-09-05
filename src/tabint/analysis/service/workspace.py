@@ -426,11 +426,13 @@ class Table:
 
 
 def data_root(allowed_dir: str | Path | None = None) -> Path:
-    """The one directory this engine may touch — TABULAR_BASE, or the cwd.
+    """The one directory this engine's SQL may touch — TABULAR_BASE, or the cwd.
 
-    The app spawns the engine with TABULAR_BASE pointing at its own analytics
-    folder, which is also where every CSV it hands over lives, so one root covers
-    session databases, ingested files and saved reports alike.
+    Holds the session databases and saved reports, and bounds every file the
+    database itself can reach (see ``confine``). Ingest is not bounded by it:
+    ``tools._ingest_paths`` stages a CSV from anywhere the process can read into
+    ``<root>/.staging`` and deletes the copy once the rows are in DuckDB, so a
+    load never widens what ``run_sql`` can see.
     """
     return Path(allowed_dir or os.environ.get("TABULAR_BASE") or ".").resolve()
 

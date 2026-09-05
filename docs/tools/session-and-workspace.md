@@ -8,10 +8,11 @@ Ingest, inspect, combine, and build tables. See
 Ingest one or more CSV files and return a `session_key`, the resulting table
 names, and the foreign-key relationships detected between them.
 
-Each file becomes a table named after it. Every path must resolve inside the
-engine's data root, or the call returns an `outside_data_dir` error naming the
-root — see
-[the data directory boundary](../configuration.md#the-data-directory-boundary).
+Each file becomes a table named after it. A path may point anywhere this process
+can read — the rows are copied into the session's database on load, so the file
+is not consulted again. An unreadable path returns a `file_not_found` error. See
+[the data directory boundary](../configuration.md#the-data-directory-boundary)
+for what the data root does still confine (SQL, not ingest).
 
 ## `list_sessions()`
 

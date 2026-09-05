@@ -62,9 +62,9 @@ Open **Terminal** (on Mac: `⌘ Space`, type "Terminal", press enter) and paste:
 curl -fsSL https://raw.githubusercontent.com/shubham303/meelu-analytics-mcp/main/install.sh | sh
 ```
 
-You'll be asked two things — where your data files should live (press enter for
-the default, a `meelu-data` folder in your home directory) and which assistants
-to connect. It detects the ones you already have installed and pre-selects them:
+You'll be asked two things — where meelu should keep its sessions (press enter
+for the default, a `meelu-data` folder in your home directory) and which
+assistants to connect. It detects the ones you already have installed and pre-selects them:
 
 ```
   Which assistants should I set this up for?
@@ -151,29 +151,11 @@ desktop assistants above.
 
 </details>
 
-### Where your data goes
-
-**Don't skip this one.** For safety, the tool can only see inside that one
-`meelu-data` folder — not your Downloads, not your Desktop, nowhere else on your
-computer. If your file isn't in there, it simply won't be found.
-
-So drag your CSV file into it (in Finder: `⌘ ⇧ H`, then open `meelu-data`). Or
-from Terminal:
-
-```bash
-cp ~/Downloads/orders.csv ~/meelu-data/
-```
-
-Put in as many files as you like. If several of them are related — orders and
-customers, say — the tool will spot how they connect on its own.
-
-*Working with Excel? Save as CSV first: File → Save As → CSV.*
-
 ### Just ask
 
-That's it. Talk to your assistant normally:
+That's it. Talk to your assistant normally, naming your file wherever it lives:
 
-> Using meelu, load orders.csv and tell me what's in it.
+> Using meelu, load ~/Downloads/orders.csv and tell me what's in it.
 
 > Using meelu, is there a real relationship between the discount we gave and
 > whether the order came back? And which test did it use?
@@ -183,6 +165,10 @@ That's it. Talk to your assistant normally:
 
 Saying **"using meelu"** the first time steers your assistant to this tool
 instead of improvising its own answer. After that it'll carry on using it.
+
+Name as many files as you like. If several of them are related — orders and
+customers, say — the tool will spot how they connect on its own. *Working with
+Excel? Save as CSV first: File → Save As → CSV.*
 
 Three follow-ups worth having in your back pocket, because they're where this
 tool earns its keep:

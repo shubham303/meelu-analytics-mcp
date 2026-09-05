@@ -21,20 +21,28 @@ is a deliberate decision about who is on your network, not a convenience flag.
 
 ## The data directory boundary
 
-`TABULAR_BASE` resolves to the engine's **data root**, and the engine will not
-read a file outside it. This is enforced twice:
+`TABULAR_BASE` resolves to the engine's **data root**. The boundary it draws is
+about *improvised* file access, not about ingest.
 
-1. **In DuckDB.** The database is confined to the root at startup and the key is
-   thrown away, so no SQL — including a hand-written `read_csv` in `run_sql` —
-   can escape it.
-2. **In front of it.** `create_session` and `add_table` resolve every path first
-   and return a readable `outside_data_dir` error naming the root, because a raw
-   DuckDB permission error tells a model nothing about where it *is* allowed to
-   look.
+**In DuckDB.** The database is confined to the root at startup and the key is
+thrown away, so no SQL — including a hand-written `read_csv` in `run_sql`,
+`create_table` or `insert_into` — can escape it. This is the boundary that
+matters: it stops an arbitrary-file read from hiding inside a plain-looking
+`SELECT`.
 
-The practical consequence: files reach the engine by being downloaded or copied
-into `TABULAR_BASE` in the first place. Relative paths, `~` and symlinks are all
-resolved before the check, so none of them widen the boundary.
+**Ingest is not subject to it.** `create_session` and `add_table` accept a path
+anywhere this process can read. Loading a CSV is a one-way copy into DuckDB —
+nothing afterwards refers back to the file — so requiring users to first move a
+spreadsheet into a blessed folder bought friction, not safety.
+
+A path outside the root is served by copying the file into a unique directory
+under `$TABULAR_BASE/.staging`, reading it from there, and deleting the copy once
+the rows are in. The database's own allow-list is never widened, so an ingest
+cannot unseal `run_sql` for the rest of the session. The table still takes its
+name from the original filename.
+
+A path that does not resolve to a readable file returns a `file_not_found` error.
+Relative paths, `~` and symlinks are all resolved first.
 
 ## Storage layout
 
