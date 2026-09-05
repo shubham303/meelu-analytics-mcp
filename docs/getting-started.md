@@ -1,5 +1,23 @@
 # Getting started
 
+## The short way
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shubham303/meelu-analytics-mcp/main/install.sh | sh
+```
+
+It installs `uv` if you don't have it, installs the server into its own isolated
+environment, asks where your data lives and which agents to configure, and
+writes their MCP config for you. Supported agents and the files it touches are
+listed in the [README](../README.md#getting-set-up). Non-interactive:
+
+```bash
+… | sh -s -- --agent claude-code,codex --data-dir ~/meelu-data --yes
+```
+
+Then skip to [a first analysis](#3-a-first-analysis). The rest of this page is
+for running the server by hand.
+
 ## Requirements
 
 - Python ≥ 3.10

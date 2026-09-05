@@ -53,95 +53,112 @@ cover, you can ask for directly — it becomes part of the same analysis.
 
 ## Getting set up
 
-This is a one-time setup. You'll need to use **Terminal** (on Mac: press `⌘ Space`,
-type "Terminal", hit enter) and copy-paste a few commands. After that you never
-touch it again — you just talk to your assistant.
+One command. It asks which assistant you use, sets it up, and downloads
+everything it needs.
 
-**Before you start**, you need two things installed:
-[Python](https://www.python.org/downloads/) version 3.10 or newer, and a tool
-called [`uv`](https://docs.astral.sh/uv/getting-started/installation/) that
-handles everything else automatically.
-
-### Step 1 — Download and start it
-
-Copy this whole block into Terminal and press enter:
+Open **Terminal** (on Mac: `⌘ Space`, type "Terminal", press enter) and paste:
 
 ```bash
-git clone https://github.com/shubham303/meelu-analytics-mcp.git
-cd meelu-analytics-mcp
-
-mkdir -p "$HOME/meelu-data"
-export TABULAR_BASE="$HOME/meelu-data"
-
-uv run --project . meelu-analytics-mcp
+curl -fsSL https://raw.githubusercontent.com/shubham303/meelu-analytics-mcp/main/install.sh | sh
 ```
 
-The first run takes a minute while it downloads what it needs. When you see:
+You'll be asked two things — where your data files should live (press enter for
+the default, a `meelu-data` folder in your home directory) and which assistants
+to connect. It detects the ones you already have installed and pre-selects them:
 
 ```
-meelu-analytics-mcp listening on http://127.0.0.1:8321/mcp
+  Which assistants should I set this up for?
+
+   1. Claude Code            found on this machine
+   2. Claude Desktop         found on this machine
+   3. OpenAI Codex           not detected
+   4. Cursor                 found on this machine
+   ...
+
+  Choice [1,2,4]:
 ```
 
-it's working. **Leave this window open** — closing it switches the tool off. Open
-a new Terminal window (`⌘ N`) for the next step.
-
-That `meelu-data` folder it just made in your home directory is where your data
-goes. More on that in step 3.
-
-### Step 2 — Connect your assistant
-
-**Claude Code** — paste this into the new Terminal window:
-
-```bash
-claude mcp add --transport http meelu-analytics http://127.0.0.1:8321/mcp
-```
-
-To check it worked, start Claude with `claude`, then type `/mcp`. You should see
-`meelu-analytics` listed as connected.
+Then restart the assistant you picked, and you're done. There's nothing to leave
+running and nothing to remember — your assistant starts the tool when it needs it.
 
 <details>
-<summary><b>Using Claude Desktop, Cursor, or something else?</b></summary>
+<summary><b>Supported assistants, and what the installer touches</b></summary>
 
-These apps have a settings file where you list tools like this one. Add this
-entry to it:
+| Assistant | Config it writes |
+|---|---|
+| Claude Code | `claude mcp add` (user scope), or `~/.claude.json` |
+| Claude Desktop | `claude_desktop_config.json` |
+| OpenAI Codex | `~/.codex/config.toml` |
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot) | `<VS Code>/User/mcp.json` |
+| Gemini CLI | `~/.gemini/settings.json` |
+| Grok CLI | `~/.grok/user-settings.json` |
+| OpenCode | `~/.config/opencode/opencode.json` |
+| Zed | `~/.config/zed/settings.json` |
 
-```json
-{
-  "mcpServers": {
-    "meelu-analytics": {
-      "type": "http",
-      "url": "http://127.0.0.1:8321/mcp"
-    }
-  }
-}
-```
+Every existing config is copied to a `.meelu-backup` file before it's changed,
+and only the `meelu-analytics` entry is added — your other servers are left
+alone.
 
-Some apps prefer to start the tool themselves, in which case you can skip step 1
-entirely and use this instead — replacing both paths with real ones:
+The one prerequisite is [`uv`](https://docs.astral.sh/uv/); if you don't have
+it, the installer offers to install it. `uv` then handles Python and all ~15
+libraries by itself — there is nothing else to install, and nothing to clone.
 
-```json
-{
-  "mcpServers": {
-    "meelu-analytics": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/meelu-analytics-mcp",
-               "meelu-analytics-mcp", "--stdio"],
-      "env": { "TABULAR_BASE": "/absolute/path/to/your/data" }
-    }
-  }
-}
+The server is installed once, up front, into its own isolated environment
+(`uv tool install`), and your agents are pointed at the resulting program. So
+starting it is instant and works offline; it isn't downloading anything each
+time your assistant wakes up. The installer also runs it once itself — the very
+first start compiles some numerical kernels and takes about a minute, and it's
+better that happens here than while your assistant is waiting on it.
+
+Non-interactive, for scripting or a second machine:
+
+```bash
+curl -fsSL .../install.sh | sh -s -- --agent claude-code,codex --data-dir ~/data --yes
 ```
 
 </details>
 
-### Step 3 — Put your spreadsheet in the data folder
+<details>
+<summary><b>Claude on the web, Cowork, or an assistant that isn't listed</b></summary>
+
+Anything that reads a standard MCP config takes this entry — print it with
+
+```bash
+curl -fsSL .../install.sh | sh -s -- --print-config
+```
+
+```json
+{
+  "mcpServers": {
+    "meelu-analytics": {
+      "command": "/Users/you/.local/bin/meelu-analytics-mcp",
+      "args": ["--stdio"],
+      "env": { "TABULAR_BASE": "/Users/you/meelu-data" }
+    }
+  }
+}
+```
+
+Claude on the web and Claude Cowork run in Anthropic's cloud, so they can't
+start a program on your laptop. There the tool has to be reachable over the
+network: run `uvx meelu-analytics-mcp` (no `--stdio`) to get an HTTP server on
+`http://127.0.0.1:8321/mcp` (run `meelu-analytics-mcp` with no `--stdio`),
+expose it, and add that URL as a custom connector.
+Your data leaves your machine if you do that — for local files, use one of the
+desktop assistants above.
+
+</details>
+
+### Where your data goes
 
 **Don't skip this one.** For safety, the tool can only see inside that one
 `meelu-data` folder — not your Downloads, not your Desktop, nowhere else on your
 computer. If your file isn't in there, it simply won't be found.
 
-So drag your CSV file into the `meelu-data` folder in your home folder (in
-Finder: `⌘ ⇧ H`, then open `meelu-data`). Or from Terminal:
+So drag your CSV file into it (in Finder: `⌘ ⇧ H`, then open `meelu-data`). Or
+from Terminal:
 
 ```bash
 cp ~/Downloads/orders.csv ~/meelu-data/
@@ -152,7 +169,7 @@ customers, say — the tool will spot how they connect on its own.
 
 *Working with Excel? Save as CSV first: File → Save As → CSV.*
 
-### Step 4 — Just ask
+### Just ask
 
 That's it. Talk to your assistant normally:
 
@@ -249,7 +266,8 @@ Everything below ships today.
 
 - **Bigger files** — sampling and out-of-memory strategies, so large data degrades
   gracefully rather than being refused.
-- **One-command install** — no cloning, no terminal setup.
+- **Windows** — the installer is tested on macOS and Linux; Windows support is
+  next.
 - **More file types** — Excel, Parquet and JSON alongside CSV.
 - **Better trust ratings** — real confidence assessments everywhere they're still
   missing.
