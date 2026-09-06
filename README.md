@@ -1,5 +1,8 @@
 <!-- mcp-name: io.github.shubham303/meelu-analytics-mcp -->
 
+> Visit [www.meelu.tech](https://www.meelu.tech) to check out our app Meelu and
+> our other open-source MCP servers.
+
 # meelu-analytics-mcp
 
 **Ask your AI assistant real questions about your data — and get answers you can
