@@ -9,7 +9,10 @@ backend is the report store. This engine computes; it does not publish.
 These tools operate on the Session facade (analysis.session) and the live session
 registry held in shared.server. They register onto the single FastMCP instance.
 """
+import shutil
+from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from tabint.analysis.db import persistence
 from tabint.analysis.service.validation.dtypes import classify_column, SETTABLE_TYPES
@@ -26,28 +29,61 @@ def _BASE() -> str:
     ones that reopened via ``get_session``."""
     return server._BASE
 
-def _contained(paths: list[str]) -> list[str] | dict:
-    """Resolve ingest paths, refusing any that leaves the engine's data root.
+def _ingest_paths(paths: list[str]):
+    """Resolve ingest paths, staging anything that lives outside the data root.
 
-    The database itself already refuses to read outside the root (see
-    ``workspace.confine``), so this is not the boundary — it is the readable
-    error in front of it, because a raw DuckDB permission error tells the model
-    nothing about where it is allowed to look.
+    Loading a CSV is a one-way trip: ``read_csv_auto`` copies the rows into
+    DuckDB and nothing afterwards refers back to the file. So *where the file
+    sat* is irrelevant to every question the session can answer — making users
+    move a CSV into a blessed folder before naming it bought no safety, only
+    friction.
+
+    What the data root does still buy is the seal in ``workspace.confine``:
+    ``enable_external_access = false`` stops agent-authored SQL (``run_sql``,
+    ``create_table``, ``insert_into``) from reading arbitrary files behind a
+    plain-looking SELECT. That seal is the boundary worth keeping, and widening
+    the allow-list per ingest would break it permanently for the session.
+
+    So an outside path is copied into a unique directory under ``<root>/.staging``
+    and read from there, and the copy is deleted once the rows are in DuckDB. The
+    unique part is the directory, not the filename, because the table takes its
+    name from the file's stem — ``~/Downloads/orders.csv`` must still land as
+    ``orders``. The database's view of the filesystem never changes; only this
+    function, acting on a path the caller named explicitly, reaches out.
+
+    Returns a context manager yielding resolved paths, or an error dict.
     """
     root = data_root(_BASE())
-    resolved, outside = [], []
-    for raw in paths:
-        full = Path(raw).expanduser().resolve()
-        if full == root or root in full.parents:
-            resolved.append(str(full))
-        else:
-            outside.append(str(full))
-    if outside:
-        return {"ok": False, "error": "outside_data_dir",
-                "message": f"These paths are outside the analytics data directory ({root}), which "
-                           f"is the only place this engine may read: {outside}. Files reach it by "
-                           f"being downloaded or attached there in the first place."}
-    return resolved
+    missing = [str(Path(p).expanduser()) for p in paths
+               if not Path(p).expanduser().resolve().is_file()]
+    if missing:
+        return {"ok": False, "error": "file_not_found",
+                "message": f"No readable file at: {missing}. Pass the path to a CSV file — "
+                           f"any location this process can read is fine."}
+    return _staged(root, [Path(p).expanduser().resolve() for p in paths])
+
+
+@contextmanager
+def _staged(root: Path, resolved: list[Path]):
+    """Yield readable-by-the-engine paths, cleaning up any staged copies after."""
+    staging = root / ".staging"
+    copies: list[Path] = []  # staging directories to remove afterwards
+    out: list[str] = []
+    try:
+        for full in resolved:
+            if full == root or root in full.parents:
+                out.append(str(full))
+                continue
+            holder = staging / uuid4().hex
+            holder.mkdir(parents=True, exist_ok=True)
+            dest = holder / full.name
+            shutil.copyfile(full, dest)
+            copies.append(holder)
+            out.append(str(dest))
+        yield out
+    finally:
+        for holder in copies:
+            shutil.rmtree(holder, ignore_errors=True)
 
 
 def _summary(session) -> dict:
@@ -62,11 +98,13 @@ def _summary(session) -> dict:
 def create_session(paths: list[str]) -> dict:
     """Create a session from one or more CSV paths. Returns the session_key,
     the loaded table names, and the auto-detected foreign-key relationships.
-    Paths must sit inside the analytics data directory — nothing else is readable."""
-    safe = _contained(paths)
-    if isinstance(safe, dict):
-        return safe
-    session = persistence.create_session(safe, base=_BASE())
+    A path may point anywhere this process can read — the rows are copied into
+    the session's database on load, so the file itself is not consulted again."""
+    staged = _ingest_paths(paths)
+    if isinstance(staged, dict):
+        return staged
+    with staged as safe:
+        session = persistence.create_session(safe, base=_BASE())
     register_session(session)
     return _summary(session)
 
@@ -87,13 +125,15 @@ def session_info(session_key: str) -> dict:
 
 @mcp.tool()
 def add_table(session_key: str, path: str) -> dict:
-    """Load another CSV into an existing session as a new table. The path must sit
-    inside the analytics data directory — nothing else is readable."""
+    """Load another CSV into an existing session as a new table. The path may point
+    anywhere this process can read — the rows are copied into the session's
+    database on load, so the file itself is not consulted again."""
     session = _get(session_key)
-    safe = _contained([path])
-    if isinstance(safe, dict):
-        return safe
-    table = session.add_table(safe[0])
+    staged = _ingest_paths([path])
+    if isinstance(staged, dict):
+        return staged
+    with staged as safe:
+        table = session.add_table(safe[0])
     return {"session_key": session_key, "added_table": table.name, "tables": session.tables}
 
 

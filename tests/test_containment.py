@@ -70,21 +70,43 @@ def test_derived_tables_cannot_reach_outside_either(session):
         session.workspace.insert_into("orders", "SELECT * FROM read_csv_auto('/etc/hosts')")
 
 
-def test_create_session_refuses_a_path_outside_the_root(base, tmp_path_factory):
-    stray = tmp_path_factory.mktemp("elsewhere") / "secret.csv"
-    stray.write_text("k\nv\n")
+def test_create_session_ingests_a_path_outside_the_root(base, tmp_path_factory):
+    """Ingest is a copy into DuckDB, so the file may live anywhere readable."""
+    root, _ = base
+    stray = tmp_path_factory.mktemp("elsewhere") / "sales.csv"
+    stray.write_text("region,amount\nnorth,10\nsouth,25\n")
     result = _tool("create_session")(paths=[str(stray)])
-    assert result["error"] == "outside_data_dir"
-    assert str(stray) in result["message"]
+    assert result["tables"] == ["sales"]  # table named for the file, not the staged copy
+    assert not list((root / ".staging").glob("*"))  # staged copy cleaned up
 
 
-def test_add_table_refuses_a_path_outside_the_root(session, tmp_path_factory):
+def test_add_table_ingests_a_path_outside_the_root(base, session, tmp_path_factory):
     from tabint.shared.server import register_session
     register_session(session)
-    stray = tmp_path_factory.mktemp("elsewhere2") / "secret.csv"
-    stray.write_text("k\nv\n")
+    root, _ = base
+    stray = tmp_path_factory.mktemp("elsewhere2") / "returns.csv"
+    stray.write_text("k,v\na,1\n")
     result = _tool("add_table")(session_key=session.id, path=str(stray))
-    assert result["error"] == "outside_data_dir"
+    assert result["added_table"] == "returns"
+    assert not list((root / ".staging").glob("*"))
+
+
+def test_ingesting_a_staged_file_does_not_unseal_sql(base, tmp_path_factory):
+    """Reading an outside CSV must not widen what agent-authored SQL can reach."""
+    stray = tmp_path_factory.mktemp("elsewhere3") / "sales.csv"
+    stray.write_text("region,amount\nnorth,10\n")
+    result = _tool("create_session")(paths=[str(stray)])
+    from tabint.shared.server import get_session
+    live = get_session(result["session_key"])
+    with pytest.raises(Exception, match="(?i)permission|cannot access"):
+        live.run_sql("SELECT * FROM read_csv_auto('/etc/hosts')")
+    with pytest.raises(Exception, match="(?i)permission|cannot access"):
+        live.run_sql(f"SELECT * FROM read_csv_auto('{stray}')")
+
+
+def test_a_missing_path_is_a_readable_error(base):
+    result = _tool("create_session")(paths=["/no/such/file.csv"])
+    assert result["error"] == "file_not_found"
 
 
 def test_reopening_in_the_same_process_stays_confined(base, session):

@@ -69,23 +69,16 @@ anyone who can reach the port. Only do that when you control the network.
 
 ## 3. A first analysis
 
-First, copy your data where the engine can reach it. The engine is sandboxed to
-`TABULAR_BASE` and cannot read anywhere else:
+Point the agent at a CSV wherever it already lives. Ask in plain language — you
+do not invoke tools yourself, the agent does:
 
-```bash
-cp ~/Downloads/orders.csv "$TABULAR_BASE"/
-```
-
-Then ask your agent in plain language — you do not invoke tools yourself, the
-agent does:
-
-> Load `orders.csv` from my meelu data directory and profile it. What's in it?
+> Load `~/Downloads/orders.csv` and profile it. What's in it?
 
 The calls below are what the agent makes on your behalf. They are shown so you
 can recognise them in the transcript and know what to ask for next.
 
 ```
-create_session(paths=["/Users/you/meelu-data/orders.csv"])
+create_session(paths=["/Users/you/Downloads/orders.csv"])
 → {"session_key": "s_a1b2c3", "tables": ["orders"], "relationships": {...}}
 ```
 
