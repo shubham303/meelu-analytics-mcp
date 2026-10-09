@@ -71,9 +71,23 @@ extra costs nothing until you call the tool that needs it:
 | Extra | Enables | Install |
 |---|---|---|
 | `insights` | `market_basket` (mlxtend), `causal_effect` (DoWhy), `detect_changepoints` (ruptures) | `uv sync --extra insights` |
+| `foundation` | *Optional preinstall only.* The TabICL v2 foundation model is normally installed on demand by the `install_foundation_model` tool (see below); this extra puts it in the server's own environment instead. Adds PyTorch | `uv sync --extra foundation` |
 | `dev` | pytest | `uv sync --extra dev` |
 | — | `reduce_dimensions(method="umap")` | `uv add umap-learn` |
-| — | `train_classifier` / `train_regressor` with `backend="tabicl"` (GPU recommended) | `uv add tabicl` |
 
 Calling a tool whose extra is missing returns an error naming the dependency
 rather than crashing the server.
+
+**The foundation model is never part of the server install.** Until an agent
+calls `install_foundation_model`, `train_*` uses gradient-boosted trees, records
+why in `metadata.backend_selection`, and returns a `hint` saying how to install
+it. The tool installs PyTorch (CPU) and TabICL into `<TABULAR_BASE>/.deps/foundation`
+— outside the package's environment, so it survives upgrades — and downloads the
+weights, in the background. See [Tabular foundation model](tools/foundation-models.md).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MEELU_FOUNDATION_AUTO_INSTALL` | unset | `1` starts the background install automatically the first time `auto` would have used the model (the call itself still trains trees) |
+| `MEELU_FOUNDATION_DEVICE` | `cpu` | Torch device for TabICL. `cuda` uses a GPU (faster; results may differ in the last digits) |
+| `HF_HOME` / `HF_HUB_CACHE` | `~/.cache/huggingface` | Where the ~220 MB of weights are cached |
+| `HF_HUB_OFFLINE` | unset | `1` never touches the network; the install step then fails with a reason and `auto` keeps using trees |

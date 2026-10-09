@@ -18,11 +18,13 @@ Table.models registry rather than in the database.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pickle
 import re
 import secrets
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -136,13 +138,24 @@ def _load_models(session: Session) -> None:
     mdir = session._dir / "models"
     if not mdir.exists():
         return
+    # A saved foundation model unpickles only if its on-demand runtime folder is
+    # on sys.path; wiring it is a no-op when nothing was ever installed.
+    from ..service.algorithms import foundation_install
+    foundation_install.wire()
     for pkl in mdir.glob("*.pkl"):
         try:
-            data = pickle.loads(pkl.read_bytes())
+            # A foundation model reloads its weights while unpickling, and its
+            # library print()s; on stdio, stdout is the protocol stream.
+            with contextlib.redirect_stdout(sys.stderr):
+                data = pickle.loads(pkl.read_bytes())
             session.workspace.table(data["table"]).models[data["name"]] = data["model"]
-        except Exception:
-            # A model whose table is gone or that fails to unpickle is skipped
-            # rather than breaking the whole session open.
+        except Exception as exc:
+            # A model whose table is gone or that fails to unpickle (e.g. a
+            # foundation model whose weights are no longer cached and can't be
+            # fetched) is skipped rather than breaking the whole session open —
+            # but say so, or the model just silently vanishes.
+            print(f"meelu: skipped saved model {pkl.name}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
             continue
 
 

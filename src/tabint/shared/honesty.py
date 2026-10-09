@@ -8,7 +8,7 @@ misleading number.
 
 Two properties, by design:
   * **Uniform.** ``_serialize.result_dict`` always emits a ``trust`` block, so
-    all 44 tools have the shape from day one (``unassessed`` until an analytic
+    all 47 tools have the shape from day one (``unassessed`` until an analytic
     populates it) — no confident-number-by-default.
   * **Ergonomic.** Analytics attach real confidence in a line or two via the
     assessors here (``from_sample_size``, ``combine``, ``with_caveats``) or refuse

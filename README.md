@@ -37,7 +37,7 @@ months from now how you got that number, it's on the record.
 
 ## What you can ask
 
-There are 45 tools under the hood, but you never call them. You ask; your
+There are 47 tools under the hood, but you never call them. You ask; your
 assistant picks. In practice that means questions like:
 
 | You ask | What you get back |
@@ -83,6 +83,15 @@ assistants to connect. It detects the ones you already have installed and pre-se
 
 Then restart the assistant you picked, and you're done. There's nothing to leave
 running and nothing to remember — your assistant starts the tool when it needs it.
+
+**Optional: sharper predictions, on demand.** Prediction questions like
+*"which customers will churn?"* can use a *tabular foundation model*
+([TabICL v2](docs/tools/foundation-models.md), open-source, commercial use
+allowed) — pre-trained on millions of tables, usually more accurate than the
+default trees on tables up to 10,000 rows. It is **not** part of the install, so
+setup stays fast. When it would help, your assistant is told so and can install
+it for you in the background (a one-time download of PyTorch and ~220 MB of
+weights, a few minutes) — or just ask: *"install the foundation model"*.
 
 <details>
 <summary><b>Supported assistants, and what the installer touches</b></summary>
@@ -219,7 +228,7 @@ The technical details, for when you want them:
 | [Honesty model](docs/honesty-model.md) | Trust levels, caveats, declines — and how to read them |
 | [Association test selection](docs/association-tests.md) | The deterministic routing table, in detail |
 | [Architecture](docs/architecture.md) | Module layout and the dependency rules behind it |
-| **[Tool reference](docs/tools/README.md)** | All 45 tools, by category |
+| **[Tool reference](docs/tools/README.md)** | All 47 tools, by category |
 
 ### Tool reference by category
 
@@ -229,6 +238,7 @@ The technical details, for when you want them:
 - [Feature engineering](docs/tools/feature-engineering.md) — deterministic column builders
 - [Clustering & dimensionality reduction](docs/tools/clustering-and-dimreduction.md)
 - [Supervised machine learning](docs/tools/supervised-ml.md) — train, evaluate, explain
+- [Tabular foundation model](docs/tools/foundation-models.md) — the optional pre-trained predictor
 - [Time series](docs/tools/time-series.md) — decompose, forecast, changepoints
 - [Drivers & causal inference](docs/tools/drivers-and-causal.md)
 - [Customer analytics](docs/tools/customer-analytics.md) — basket, RFM, cohorts

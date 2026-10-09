@@ -1,6 +1,7 @@
 # Tool reference
 
-All 45 MCP tools. Every one takes `session_key` as its first argument, and every
+All 47 MCP tools. Every one except `install_foundation_model` takes `session_key`
+as its first argument, and every
 analytic takes a `table` as its second — see the
 [session model](../session-model.md).
 
@@ -13,7 +14,7 @@ analytic takes a `table` as its second — see the
 | [Descriptive & exploratory](descriptive.md) | `profile`, `detect_outliers`, `analyze_association`, `association_matrix` |
 | [Feature engineering](feature-engineering.md) | `combine_columns`, `transform_column`, `bin_column`, `expand_datetime`, `group_aggregate`, `row_aggregate`, `normalize_fractions`, `compute_feature` |
 | [Clustering & dim. reduction](clustering-and-dimreduction.md) | `cluster`, `profile_clusters`, `reduce_dimensions` |
-| [Supervised ML](supervised-ml.md) | `train_classifier`, `train_regressor`, `evaluate`, `feature_importance`, `add_predictions`, `explain_prediction` |
+| [Supervised ML](supervised-ml.md) | `train_classifier`, `train_regressor`, `evaluate`, `feature_importance`, `add_predictions`, `explain_prediction`; [foundation model](foundation-models.md): `install_foundation_model`, `finetune_foundation_model` |
 | [Time series](time-series.md) | `decompose`, `forecast`, `detect_changepoints`, `compare_periods` |
 | [Drivers & causal](drivers-and-causal.md) | `explain_metric`, `causal_effect` |
 | [Customer analytics](customer-analytics.md) | `market_basket`, `rfm`, `retention_cohorts` |
@@ -33,8 +34,9 @@ analytic takes a `table` as its second — see the
 ## Tools that need optional extras
 
 `market_basket`, `causal_effect`, and `detect_changepoints` need the `insights`
-extra; `reduce_dimensions(method="umap")` needs `umap-learn`; the `tabicl`
-training backend needs `tabicl`. See
+extra; `reduce_dimensions(method="umap")` needs `umap-learn`; the foundation
+model behind `train_*` (`backend="auto"`/`"tabicl"`) and
+`finetune_foundation_model` is installed on demand by `install_foundation_model`. See
 [Configuration](../configuration.md#dependencies).
 
 ## Reading results

@@ -8,8 +8,8 @@ Evaluation, permutation importance, and every reported metric come from the 25%
 the model never saw. A metric computed on training data is not a metric, it is a
 memory test.
 
-## `train_classifier(session_key, table, target, name=None, backend="gbt")`
-## `train_regressor(session_key, table, target, name=None, backend="gbt")`
+## `train_classifier(session_key, table, target, name=None, backend="auto")`
+## `train_regressor(session_key, table, target, name=None, backend="auto")`
 
 Train a model to predict `target` from every other usable column, and persist it
 under `name` (defaulting to the target's name). Models are saved to the session,
@@ -24,15 +24,25 @@ model and is applied identically at prediction time. That is what makes
 
 | Backend | What it is |
 |---|---|
-| `gbt` (default) | `HistGradientBoosting` — fast, strong on tabular data, no GPU |
-| `tabicl` | TabICL v2, a tabular foundation model. No per-task training; strong on small and medium tables. Needs `uv add tabicl`, GPU recommended |
+| `auto` (default) | TabICL v2 when it is installed and the table is within its envelope (≤10k rows, ≤500 encoded features, ≤10 classes); otherwise `gbt`. The choice and the reason are recorded in `metadata.backend_selection` |
+| `gbt` | `HistGradientBoosting` — fast, strong on tabular data, no GPU |
+| `tabicl` | TabICL v2, a pre-trained tabular foundation model. No per-task training; strong on small and medium tables. Installed on demand by `install_foundation_model`; declines (rather than substituting trees) if it is not installed |
+
+When `auto` would have used TabICL but it isn't installed, the result carries a
+`hint` to call `install_foundation_model`. See
+[Tabular foundation model](foundation-models.md) for the selection rule, the
+on-demand install, and fine-tuning (`finetune_foundation_model`).
 
 **Training refuses** under 30 usable rows, or when a class has fewer than 2
 examples. A model whose metrics are meaningless is worse than a refusal — it
 produces a number that looks like evidence. The refusal comes back as a declined
 result and nothing is saved. See the [Honesty model](../honesty-model.md).
 
-Returns the model name, target, task, backend, and the feature columns used.
+Returns the model name, target, task, the backend actually used, the feature
+columns, `metadata.backend_selection`, and the held-out metrics (the same ones
+`evaluate` reports) with a `trust` block derived from them. A model that is no
+better than always predicting the most common class (or the mean, for
+regression) gets **low** trust and a caveat saying so, however many rows it saw.
 
 ## `evaluate(session_key, table, model_name)`
 
@@ -40,7 +50,7 @@ Metrics on the held-out split.
 
 | Task | Metrics |
 |---|---|
-| Classification | accuracy, precision, recall, F1, ROC-AUC, confusion matrix |
+| Classification | accuracy, precision, recall, F1, ROC-AUC, confusion matrix, majority-class baseline accuracy |
 | Regression | MAE, RMSE, R² |
 
 Read the confusion matrix, not just the accuracy. On imbalanced data — 95% of
@@ -55,7 +65,8 @@ concentrated in a few bad predictions rather than spread evenly.
 ## `feature_importance(session_key, table, model_name)`
 
 Permutation importance — shuffle one column, measure how much held-out
-performance drops — with 10 repeats, aggregated back to the original columns.
+performance drops — with 10 repeats (5 for the foundation model, batched into
+one predict call), aggregated back to the original columns.
 
 Aggregation matters: a categorical column becomes many one-hot columns during
 training, and importance reported per dummy is unreadable. These are summed back
@@ -83,8 +94,10 @@ Note that predictions for rows in the training portion are optimistic. Use
 
 A SHAP local explanation for one row (0-based index): which features pushed this
 particular prediction up or down, and by how much. Uses the exact `TreeExplainer`
-for the gradient-boosted default, and contributions are summed back to the
-original columns like importances are.
+for gradient-boosted trees, and an approximate permutation SHAP over a small
+fixed background for the foundation model (`method: "shap_permutation"`, with a
+caveat). Contributions are summed back to the original columns like importances
+are.
 
 This answers a different question from `feature_importance`. Importance is global
 — what the model relies on across all rows. SHAP here is local — why *this* row

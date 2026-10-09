@@ -33,7 +33,12 @@ _INSTRUCTIONS = """Deterministic single-table data analysis. Workflow:
    `declined` is true the data cannot support the question: report the refusal and
    its reason and do NOT substitute a number. Always convey the trust level and
    caveats to the user; never present a low-trust or declined result as a
-   confident fact."""
+   confident fact.
+5. Predictions (train_classifier / train_regressor) can use an optional, more
+   accurate pre-trained tabular foundation model. If a training result carries a
+   `hint` that it is not installed, you may call install_foundation_model (it
+   installs in the background), call it again until it reports "ready", then
+   train again — or simply use the tree model you already have."""
 
 mcp = FastMCP("tabint", instructions=_INSTRUCTIONS)
 
