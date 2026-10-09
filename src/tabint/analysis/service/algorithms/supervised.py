@@ -114,6 +114,8 @@ class TrainedModel:
         backend: str = "gbt",
         trust: honesty.Trust | None = None,
         selection: dict[str, Any] | None = None,
+        X_train: pd.DataFrame | None = None,
+        y_train: pd.Series | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._numeric_features = numeric_features
@@ -136,10 +138,42 @@ class TrainedModel:
         # How the backend was chosen (requested, chosen, reason, checks) — the
         # deterministic-selection record every downstream result repeats.
         self._selection = selection or {"requested": backend, "chosen": backend}
+        # Foundation models keep their training split so the explainers can refit
+        # a cheaper (fewer-estimator) copy; trees never need it.
+        self._X_train = X_train
+        self._y_train = y_train
+        # Held-out predictions, computed once: a foundation model re-reads its whole
+        # context on every call, so training, evaluate and the train response all
+        # share one scoring of the test split.
+        self._holdout: tuple[np.ndarray, np.ndarray | None] | None = None
 
     @property
     def is_foundation(self) -> bool:
         return getattr(self, "_backend", "gbt") in FOUNDATION_BACKENDS
+
+    def holdout_predictions(self) -> tuple[np.ndarray, np.ndarray | None]:
+        """(predictions, class probabilities or None) for the held-out split, cached.
+
+        For classifiers the labels are derived from ONE predict_proba call
+        (argmax over ``classes_``, which is how sklearn classifiers and TabICL
+        predict) instead of a second full pass.
+        """
+        cached = getattr(self, "_holdout", None)
+        if cached is not None:
+            return cached
+        X_test = self._X_test
+        proba = None
+        if self._task == "classification":
+            try:
+                proba = self.predict_proba(X_test)
+                classes = self._pipeline.named_steps["model"].classes_
+                y_pred = np.asarray(classes)[np.argmax(proba, axis=1)]
+            except Exception:
+                proba, y_pred = None, self.predict(X_test)
+        else:
+            y_pred = self.predict(X_test)
+        self._holdout = (np.asarray(y_pred), proba)
+        return self._holdout
 
     def predict(self, X: Any) -> np.ndarray:
         """Predict values / class labels for new rows.
@@ -319,15 +353,24 @@ def _train(store: Any, target: str, task: str, backend: str = _DEFAULT_BACKEND):
     # Neither trees nor TabICL need scaling; still impute + one-hot for uniform
     # handling and a fully numeric matrix the foundation model can consume.
     pre = _prep.build_preprocessor(numeric, nominal, ordinal, scale=False)
-    pipeline = Pipeline([("pre", pre), ("model", _make_estimator(task, chosen))])
+    model: TrainedModel | None = None
     try:
+        pipeline = Pipeline([("pre", pre), ("model", _make_estimator(task, chosen))])
         with foundation.quiet():
             pipeline.fit(X_train, y_train)
-            if chosen in FOUNDATION_BACKENDS:
-                # TabICL's fit only loads weights; the forward pass — where memory
-                # or runtime failures surface — happens at predict time. Probe it
-                # here so those failures reach the fallback/decline below.
-                pipeline.predict(X_test.iloc[:5])
+        if chosen in FOUNDATION_BACKENDS:
+            selection = {**selection, "foundation": foundation.runtime_info()}
+            model = TrainedModel(
+                pipeline=pipeline, numeric_features=numeric, nominal_features=nominal,
+                ordinal_features=ordinal, target=target, task=task, X_test=X_test,
+                y_test=y_test, backend=chosen, selection=selection,
+                X_train=X_train, y_train=y_train,
+            )
+            # TabICL's fit only loads weights; the forward pass — where memory or
+            # runtime failures surface — happens at predict time. Scoring the
+            # held-out split here (cached for evaluate) routes those failures to
+            # the fallback/decline below.
+            model.holdout_predictions()
     except Exception as exc:
         if chosen not in FOUNDATION_BACKENDS:
             raise
@@ -342,6 +385,7 @@ def _train(store: Any, target: str, task: str, backend: str = _DEFAULT_BACKEND):
                       f"gradient-boosted trees. {failure}",
         }
         chosen = "gbt"
+        model = None
         pipeline = Pipeline([("pre", clone(pre)), ("model", _make_estimator(task, chosen))])
         pipeline.fit(X_train, y_train)
 
@@ -356,6 +400,9 @@ def _train(store: Any, target: str, task: str, backend: str = _DEFAULT_BACKEND):
         *caveats,
     )
 
+    if model is not None:  # the foundation model, already scored
+        model._trust = trust
+        return model
     return TrainedModel(
         pipeline=pipeline,
         numeric_features=numeric,
@@ -384,8 +431,9 @@ def finetune(
     can help on tables unlike the model's synthetic pre-training data, and can
     also overfit — so the pre-trained model is scored on the SAME held-out split
     and the comparison is reported. Guardrails: the foundation model must be
-    installed (``install_foundation_model``), at most ``FINETUNE_MAX_ROWS`` rows, and a hard time limit (default
-    ``FINETUNE_DEFAULT_SECONDS``, capped at ``FINETUNE_MAX_SECONDS``).
+    installed (``install_foundation_model``), at most ``FINETUNE_MAX_ROWS`` rows,
+    and a hard time limit (default ``FINETUNE_DEFAULT_SECONDS``, capped at
+    ``FINETUNE_MAX_SECONDS``) so the whole call fits the CPU latency budget.
 
     Args:
         store: The Store instance.
@@ -405,7 +453,7 @@ def finetune(
     X, y, numeric, nominal, ordinal = prepared
     n_rows = len(X)
     n_features = _encoded_width(X, numeric, nominal, ordinal)
-    budget = float(min(max(max_seconds, 10), foundation.FINETUNE_MAX_SECONDS))
+    budget = float(min(max(max_seconds, 5), foundation.FINETUNE_MAX_SECONDS))
     selection: dict[str, Any] = {
         "requested": "finetune", "chosen": backend,
         "reason": f"Fine-tuning {foundation.MODEL_LABEL} requested explicitly.",
@@ -423,7 +471,7 @@ def finetune(
     if n_rows > foundation.FINETUNE_MAX_ROWS:
         return _train_declined(
             target, task, backend, n_rows,
-            f"{n_rows:,} rows is too many to fine-tune on a CPU in reasonable time (limit "
+            f"{n_rows:,} rows is too many to fine-tune within the CPU latency budget (limit "
             f"{foundation.FINETUNE_MAX_ROWS:,}). Use train_* with backend='tabicl' — the "
             "pre-trained model needs no fine-tuning to work.",
             selection,
@@ -439,11 +487,16 @@ def finetune(
     try:
         with foundation.quiet():
             pretrained.fit(X_train, y_train)
+            score_pre = _primary_score(task, y_test, pretrained.predict(X_test))
             started = time.monotonic()
             tuned.fit(X_train, y_train)
             elapsed = time.monotonic() - started
-            score_pre = _primary_score(task, y_test, pretrained.predict(X_test))
-            score_tuned = _primary_score(task, y_test, tuned.predict(X_test))
+        model = TrainedModel(
+            pipeline=tuned, numeric_features=numeric, nominal_features=nominal,
+            ordinal_features=ordinal, target=target, task=task, X_test=X_test,
+            y_test=y_test, backend=backend, X_train=X_train, y_train=y_train,
+        )
+        score_tuned = _primary_score(task, y_test, model.holdout_predictions()[0])
     except Exception as exc:
         return _train_declined(target, task, backend, n_rows,
                                foundation.describe_failure(exc), selection)
@@ -460,6 +513,7 @@ def finetune(
         "held_out_pretrained": score_pre, "held_out_finetuned": score_tuned,
         "improved_over_pretrained": improved,
     }
+    selection["foundation"] = foundation.runtime_info()
 
     caveats = [*_TRAIN_CAVEATS, _FOUNDATION_CAVEAT,
                f"Fine-tuned on this table: held-out {metric} {score_tuned:.3f} vs "
@@ -469,28 +523,22 @@ def finetune(
             "Fine-tuning did NOT beat the pre-trained model on held-out data — prefer "
             "train_* with backend='tabicl' for this table."
         )
+    caveats.append(
+        "Choosing between the fine-tuned and pre-trained model by their held-out "
+        "scores uses the test split for selection, so the winner's score is "
+        "slightly optimistic."
+    )
     if hit_budget:
         caveats.append(
             "Fine-tuning stopped at its time limit, so how many epochs ran depends on "
             "machine speed — a rerun elsewhere can give slightly different weights."
         )
-    trust = honesty.with_caveats(
+    model._trust = honesty.with_caveats(
         honesty.from_sample_size(n_rows, low=_MIN_TRAIN_ROWS, moderate=200, label="rows"),
         *caveats,
     )
-    return TrainedModel(
-        pipeline=tuned,
-        numeric_features=numeric,
-        nominal_features=nominal,
-        ordinal_features=ordinal,
-        target=target,
-        task=task,
-        X_test=X_test,
-        y_test=y_test,
-        backend=backend,
-        trust=trust,
-        selection=selection,
-    )
+    model._selection = selection
+    return model
 
 
 def _primary_score(task: str, y_true: Any, y_pred: Any) -> float:
@@ -515,7 +563,10 @@ def evaluate(store: Any, model: TrainedModel) -> Result:
         Result with the metric set and evaluation parameters.
     """
     X_test, y_test = model._X_test, model._y_test
-    y_pred = model.predict(X_test)
+    if hasattr(model, "holdout_predictions"):
+        y_pred, proba = model.holdout_predictions()
+    else:  # pragma: no cover - duck-typed models without the cache
+        y_pred, proba = model.predict(X_test), None
 
     if model._task == "classification":
         values: dict[str, Any] = {
@@ -527,13 +578,19 @@ def evaluate(store: Any, model: TrainedModel) -> Result:
             # What "always predict the most common class" would score on this split.
             "baseline_accuracy": float(pd.Series(y_test).value_counts(normalize=True).iloc[0]),
         }
-        values["roc_auc"] = _safe_roc_auc(model, X_test, y_test)
+        values["roc_auc"] = _safe_roc_auc(model, X_test, y_test, proba)
         summary = f"accuracy={values['accuracy']:.3f}, f1={values['f1']:.3f}"
         method = "classification_metrics"
         no_skill = values["accuracy"] <= values["baseline_accuracy"]
+        auc = values["roc_auc"]
         no_skill_note = (
             f"The model is no better than always predicting the most common class "
-            f"(accuracy {values['accuracy']:.3f} vs baseline {values['baseline_accuracy']:.3f})."
+            f"(accuracy {values['accuracy']:.3f} vs baseline {values['baseline_accuracy']:.3f})"
+            + (f"; ROC-AUC {auc:.3f} — " + (
+                "it still ranks cases somewhat better than chance, so its scores may "
+                "be useful for ranking but its yes/no labels are not."
+                if auc >= 0.6 else "no better than chance at ranking either.")
+               if auc is not None else ".")
         )
     else:
         values = {
@@ -580,10 +637,13 @@ def evaluate(store: Any, model: TrainedModel) -> Result:
     )
 
 
-def _safe_roc_auc(model: TrainedModel, X_test: pd.DataFrame, y_test: pd.Series) -> float | None:
+def _safe_roc_auc(
+    model: TrainedModel, X_test: pd.DataFrame, y_test: pd.Series, proba: Any = None
+) -> float | None:
     """ROC-AUC, handling binary vs multiclass; None if it can't be computed."""
     try:
-        proba = model.predict_proba(X_test)
+        if proba is None:
+            proba = model.predict_proba(X_test)
         classes = model._pipeline.named_steps["model"].classes_
         if len(classes) == 2:
             return float(roc_auc_score(y_test, proba[:, 1]))

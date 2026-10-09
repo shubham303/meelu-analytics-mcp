@@ -116,6 +116,8 @@ class Table:
         self._view = view
         self._table = workspace._ibis.table(view)  # ibis TableExpr for the view
         self.models: dict[str, Any] = {}
+        # Saved models that couldn't be loaded on open: name → {reason, path, backend}.
+        self.skipped_models: dict[str, dict[str, Any]] = {}
 
     def __repr__(self) -> str:
         return f"<Table {self.name!r} cols={list(self._table.schema().names)}>"
@@ -348,7 +350,7 @@ class Table:
         return model
 
     def finetune_foundation_model(
-        self, target: str, task: str, name: str | None = None, max_seconds: float = 120
+        self, target: str, task: str, name: str | None = None, max_seconds: float = 20
     ) -> Any:
         model = supervised.finetune(self, target, task, max_seconds)
         if isinstance(model, Result):  # honesty seam declined — nothing to register
@@ -362,6 +364,17 @@ class Table:
     def add_predictions(self, model_name: str, column_name: str | None = None) -> Result:
         model = self._model(model_name)
         frame = self.get_frame()
+        if getattr(model, "is_foundation", False):
+            from .algorithms import foundation
+            cap = foundation.predict_max_rows()
+            if len(frame) > cap:
+                reason = (f"Scoring {len(frame):,} rows with {foundation.MODEL_LABEL} would take "
+                          f"minutes on {foundation.device().upper()} (per-call limit {cap:,} "
+                          "rows). Train with backend='gbt' to score a table this size.")
+                return Result(method="add_predictions", summary=f"Declined: {reason}",
+                              metadata={"model": model_name, "table": self.name,
+                                        "backend": model._backend, "n_rows": len(frame)},
+                              trust=honesty.decline(reason))
         preds = model.predict(frame[model._feature_names])
         col = column_name or f"{model_name}_pred"
         self.write_back_column(col, list(preds))
@@ -443,6 +456,22 @@ class Table:
     # --- internals -------------------------------------------------------- #
 
     def _model(self, name: str) -> Any:
+        if name not in self.models and name in self.skipped_models:
+            # Saved but not loadable at open — retry now (the runtime may have
+            # been installed since), else say exactly why.
+            import pickle
+            from ..db.persistence import load_model_envelope
+            skipped = self.skipped_models[name]
+            try:
+                model, reason = load_model_envelope(
+                    pickle.loads(Path(skipped["path"]).read_bytes()))
+            except OSError as exc:
+                model, reason = None, str(exc)
+            if model is None:
+                raise LookupError(f"Model {name!r} on table {self.name!r} is saved but could "
+                                  f"not be loaded: {reason}")
+            self.models[name] = model
+            del self.skipped_models[name]
         if name not in self.models:
             raise KeyError(f"No model {name!r} on table {self.name!r}. Known: {list(self.models)}")
         return self.models[name]

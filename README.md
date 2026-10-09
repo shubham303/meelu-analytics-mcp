@@ -88,7 +88,7 @@ running and nothing to remember — your assistant starts the tool when it needs
 *"which customers will churn?"* can use a *tabular foundation model*
 ([TabICL v2](docs/tools/foundation-models.md), open-source, commercial use
 allowed) — pre-trained on millions of tables, usually more accurate than the
-default trees on tables up to 10,000 rows. It is **not** part of the install, so
+default trees on tables of up to a couple of thousand rows. It is **not** part of the install, so
 setup stays fast. When it would help, your assistant is told so and can install
 it for you in the background (a one-time download of PyTorch and ~220 MB of
 weights, a few minutes) — or just ask: *"install the foundation model"*.

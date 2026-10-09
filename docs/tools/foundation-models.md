@@ -27,7 +27,7 @@ server's install — that stays fast. Instead:
 2. `install_foundation_model` starts a **background** install and returns
    immediately with `state: "installing"`. Calling it again reports progress
    (`step`), and finally `"ready"` — or `"failed"` with a `reason` (calling again
-   retries). `wait_seconds` (max 120) blocks that long first, so an agent can
+   retries). `wait_seconds` (default 0 — return at once; max 50) blocks that long first, so an agent can
    poll without spamming.
 3. Once `"ready"`, retrain: `auto` now picks TabICL.
 
@@ -35,9 +35,12 @@ What the install does:
 
 | Step | Detail |
 |---|---|
-| Packages | `uv pip install --target <TABULAR_BASE>/.deps/foundation` of `tabicl>=2.2,<2.3`, `transformers` (fine-tuning only) and `torch` — `python -m pip` if `uv` isn't on PATH. CPU-only torch: the PyTorch CPU index on Linux (the default Linux wheel bundles GBs of CUDA), the default wheels on macOS. Versions are constrained to the running numpy / scipy / scikit-learn / pandas and resolved for the running Python. About 700 MB on disk. |
+| Packages | `uv pip install --target <TABULAR_BASE>/.deps/foundation` of `tabicl>=2.2,<2.3`, `transformers` (fine-tuning only) and `torch` — `python -m pip` only if `uv` isn't available. CPU-only torch: uv's `--torch-backend cpu` on Linux (the default Linux wheel bundles GBs of CUDA; pip falls back to the PyTorch CPU index), the default wheels on macOS. **Every** distribution in the server's environment is pinned to its running version, and wheels are resolved for the running Python. About 700 MB on disk. |
+| Version stamp | `.complete` records the interpreter (`cpython-312`), platform and core numpy / scipy / scikit-learn / pandas versions it was built for. After a Python or core-library upgrade the stamp no longer matches: the folder counts as **not installed** (status explains why) and the next `install_foundation_model` replaces it. |
+| Concurrency | Several server processes can share one data root. The package step holds an inter-process file lock (`.deps/.install.lock`), sweeps staging folders left by a killed install, swaps the finished folder in with `os.replace`, and never removes a folder that is already complete and matching. |
 | Location | Outside the package's own environment, so it survives `uv tool install --force` upgrades and `uvx` cache wipes. Packages land in a temporary sibling folder that is renamed into place only on success, so a failed install never leaves a half-usable folder. |
-| `sys.path` | The folder is **appended** lazily, only on the foundation code path (and before saved models are unpickled), so the core environment's own libraries always win. |
+| `sys.path` | The folder is **appended** only when a TabICL model is actually built or unpickled — never just to check whether it's installed — so its extra packages can't start satisfying the core libraries' optional imports, and the core environment's own libraries always win. |
+| No inline downloads | Models are built with `allow_auto_download=False`: weights come only from `install_foundation_model`, never from inside a training or prediction call. |
 | Weights | Both pinned checkpoints (~110 MB each) download into the Hugging Face cache (`~/.cache/huggingface`). After that the model works offline. |
 
 "Installed" means *packages importable and weights cached*, so a training call
@@ -51,7 +54,7 @@ trees). People who want it preinstalled can use the `foundation` extra
 Measured from an environment without torch (macOS, warm `uv` cache): the tool
 returned in under a second; packages were in place within a minute; the weights
 download took ~2.5 minutes on a slow connection; the first TabICL training after
-that took ~29 s (torch import and model load), later ones ~9 s.
+that took ~29 s (torch import and model load).
 
 ## How the model is chosen
 
@@ -64,8 +67,8 @@ same table on the same install gets the same choice:
 | Check | Outcome when it fails |
 |---|---|
 | Foundation model installed (packages + weights) | gradient-boosted trees (`gbt`), plus a `hint` if the table is within the envelope |
-| ≤ 10,000 usable rows (CPU budget) | `gbt` |
-| ≤ 500 features after one-hot encoding | `gbt` |
+| ≤ 2,000 usable rows (CPU latency budget) | `gbt` |
+| ≤ 30,000 rows × features after one-hot encoding (CPU latency budget) | `gbt` |
 | ≤ 10 classes (classification) | `gbt` |
 | All pass | **TabICL v2** (`tabicl`) |
 
@@ -80,17 +83,33 @@ Every training result records the decision in `metadata.backend_selection`:
 "backend_selection": {
   "requested": "auto",
   "chosen": "tabicl",
-  "reason": "TabICL v2 installed and the table is within its envelope (≤10,000 rows, ≤500 features, ≤10 classes) — using TabICL v2.",
-  "checks": {"foundation_installed": true, "n_rows": 600, "n_encoded_features": 6, "n_classes": 2, "...": "..."}
+  "reason": "TabICL v2 installed and the table is within its CPU envelope (≤2,000 rows, ≤30,000 rows×features, ≤10 classes) — using TabICL v2.",
+  "checks": {"foundation_installed": true, "device": "cpu", "n_rows": 600, "n_encoded_features": 6, "n_cells": 3600, "n_classes": 2, "...": "..."},
+  "foundation": {"device": "cpu", "n_estimators": 4, "checkpoints": {"classification": "tabicl-classifier-v2-20260212.ckpt", "regression": "tabicl-regressor-v2-20260212.ckpt"}, "tabicl_version": "2.2.0", "torch_version": "2.11.0"}
 }
 ```
 
 You can also choose the backend yourself:
 
 - **`backend="gbt"`** always uses trees.
-- **`backend="tabicl"`** forces the foundation model, up to 100,000 rows and
-  2,000 features. If it isn't installed, it returns a **declined** result
-  pointing at `install_foundation_model` rather than quietly substituting trees.
+- **`backend="tabicl"`** forces the foundation model (also above 10 classes),
+  within the same latency budget. If it isn't installed, or the table is past
+  the budget, it returns a **declined** result — pointing at
+  `install_foundation_model`, or at `gbt` — rather than quietly substituting
+  trees.
+
+### Why the envelope is so small: CPU latency
+
+Every TabICL predict call re-reads its whole training context, and on a CPU its
+cost grows with context rows × features. Measured on an 8 GB Apple-silicon
+laptop (CPU, 4 threads), 8-member ensemble: ~10 s per call for 1,500 context rows
+× 10 features, ~35 s at × 40 features, and only ~40 rows/s of query throughput —
+so a 10,000-row table would take minutes per call. FastMCP runs tools on its
+event loop, so a slow call freezes the whole server. The envelope is therefore a
+**latency budget** (every foundation tool call within about a minute on a laptop
+CPU), not the model's accuracy ceiling. On CPU the ensemble is 4 members (half
+the cost of tabicl's default 8). A GPU (`MEELU_FOUNDATION_DEVICE=cuda`) raises
+the limits 25×.
 
 ## Honest evaluation
 
@@ -111,16 +130,20 @@ from them:
 
 | Tool | With the foundation model |
 |---|---|
-| `evaluate` | Unchanged. Held-out accuracy / precision / recall / F1 / ROC-AUC, or MAE / RMSE / R². |
-| `add_predictions` | One batched predict over the whole table. Rows the model trained on were in its context, so their predictions sit close to their known labels — a caveat says so; use `evaluate` for real accuracy. |
-| `feature_importance` | Permutation importance, with **5** repeats instead of 10, on at most 1,000 held-out rows (a fixed-seed sample). Shuffled copies are scored in batched predict calls of up to 50,000 rows, because much of TabICL's cost is per call (it re-reads the training context). Recorded as `metadata.n_repeats` and `metadata.n_rows_scored`. |
-| `explain_prediction` | **Approximate** permutation SHAP over a fixed 20-row background, with 2·features+1 evaluations. Returned as `method: "shap_permutation"`. For binary targets it explains the probability of the positive class (`metadata.explained_class`), like the trees backend. A caveat says the contribution sizes are estimates and their ranking is more reliable. |
+| `evaluate` | Held-out accuracy / precision / recall / F1 / ROC-AUC, or MAE / RMSE / R². The held-out split is scored once (at training, inside the guarded block) and cached, so `evaluate` is instant. |
+| `add_predictions` | One batched predict over the whole table; declines above 4,000 rows (minutes on a CPU). Rows the model trained on were in its context, so their predictions sit close to their known labels — a caveat says so; use `evaluate` for real accuracy. |
+| `feature_importance` | Permutation importance with **3** repeats, scored by a **2-member refit** of the same model (about 4× cheaper per call) in one batched predict. The TOTAL rows scored per call are capped at 4,000: held-out rows = 4,000 ÷ (1 + 3 × features), a fixed-seed sample; below 30 rows it **declines** (table too wide — use `gbt`). Recorded as `n_repeats`, `n_rows_scored`, `rows_scored_total`, `explainer_n_estimators`. |
+| `explain_prediction` | **Approximate** permutation SHAP with the same 2-member refit, 2·features+1 evaluations, and a background of up to 20 rows sized so the total stays ≤ 4,000 scored rows (declines below a 5-row background). Returned as `method: "shap_permutation"`. For binary targets it explains the probability of the positive class (`metadata.explained_class`), like the trees backend. A caveat says the contribution sizes are estimates and their ranking is more reliable. |
 
-On an 8 GB Apple-silicon laptop (CPU only, 4 torch threads), a 600-row churn table measured: train and score
-~9 s, `evaluate` ~6 s, `add_predictions` ~5 s, `feature_importance` ~18 s,
-`explain_prediction` ~8 s.
+At the edge of the envelope — 2,000 rows × 15 encoded features, measured
+through the MCP protocol on that laptop while another test suite was competing
+for memory — every call stayed under 16 s: `train_classifier` 15.9 s (fit +
+held-out scoring), `evaluate` 0.0 s (cached), `add_predictions` 11.6 s,
+`feature_importance` 10.8 s, `explain_prediction` 11.7 s. Fine-tuning at its
+1,000-row cap took 28 s in total. The first SHAP call in a fresh process can add
+~30 s of one-time shap/numba start-up (the same for trees).
 
-## `finetune_foundation_model(session_key, table, target, task, name=None, max_seconds=120)`
+## `finetune_foundation_model(session_key, table, target, task, name=None, max_seconds=20)`
 
 Runs gradient steps on the training split so the weights adapt to this one
 table. It is usually unnecessary, because the pre-trained model already works.
@@ -132,9 +155,9 @@ is disappointing.
 | Guardrail | Behaviour |
 |---|---|
 | Installed | If the foundation model isn't installed, the tool declines and points at `install_foundation_model`. |
-| Row cap | Above **5,000 rows**, the tool declines (too slow on a CPU). Use `train_*` with `backend="tabicl"` instead. |
-| Time budget | Hard limit, default 120 s, capped at 600 s. Training runs at most 10 epochs, with early stopping on an internal validation slice. |
-| Comparison | The pre-trained model is scored on the **same** held-out split. Both numbers are reported in `metadata.backend_selection.finetune`. If fine-tuning didn't improve the held-out score, a caveat recommends the pre-trained model. |
+| Row cap | Above **1,000 rows**, the tool declines (the whole call — two held-out scorings plus training — must fit the CPU latency budget). Use `train_*` with `backend="tabicl"` instead. |
+| Time budget | Hard limit, default 20 s, capped at 30 s. Training runs at most 10 epochs, with early stopping on an internal validation slice. |
+| Comparison | The pre-trained model is scored on the **same** held-out split. Both numbers are reported in `metadata.backend_selection.finetune`. If fine-tuning didn't improve the held-out score, a caveat recommends the pre-trained model; another caveat notes that choosing between the two by test score is selection on the test split, so the winner's score is slightly optimistic. |
 | Time-limit caveat | If the run stops at its time limit, a caveat says that the number of epochs (and so the weights) depends on machine speed. |
 
 The saved model (`backend: "tabicl_finetuned"`) works with every downstream tool.
@@ -184,6 +207,7 @@ can differ in the last digits.
 
 | Limit | Detail |
 |---|---|
-| CPU latency | Every TabICL predict call re-reads the training context, so even a one-row prediction costs a few seconds on a CPU. Tables of hundreds to a few thousand rows are comfortable. Near the 10,000-row `auto` ceiling, expect tens of seconds per call. |
+| CPU latency | Every TabICL predict call re-reads the training context, so even a one-row prediction costs a few seconds on a CPU; the envelope above keeps each call within about a minute. Larger tables use trees unless a GPU is configured. |
+| Saved sessions on another machine | A saved TabICL model needs the runtime and weights wherever the session is reopened. If they are missing (or the runtime is stale), `session_info` lists the model under `unloaded_models` with the reason and the install hint, and using it raises that reason; after `install_foundation_model` the next use loads it. |
 | Not causal | Like any model, it learns associations. Importance and SHAP describe the model, not the world. |
 | One held-out split | The trust block reflects a single split. A different split or fresh data can score differently. |

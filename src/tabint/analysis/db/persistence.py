@@ -128,35 +128,68 @@ def save_model(session: Session, table_name: str, model_name: str, model: Any) -
     if session._dir is None:
         raise ValueError("save_model requires a persistent session.")
     path = session._dir / "models" / f"{_safe(table_name)}__{_safe(model_name)}.pkl"
+    # The model is pickled separately inside a plain envelope, so a session can
+    # always read WHICH model a file holds — and report it — even when the model
+    # itself can't be loaded (e.g. a foundation model whose runtime is missing).
+    envelope = {"table": table_name, "name": model_name,
+                "backend": getattr(model, "_backend", None),
+                "model_pickle": pickle.dumps(model)}
     with open(path, "wb") as fh:
-        pickle.dump({"table": table_name, "name": model_name, "model": model}, fh)
+        pickle.dump(envelope, fh)
     _write_meta(session)
 
 
 def _load_models(session: Session) -> None:
-    """Load every pickled model back into its table's registry."""
+    """Load every pickled model back into its table's registry.
+
+    A model that can't be loaded — typically a foundation model whose on-demand
+    runtime or weights are missing on this machine — is recorded in its table's
+    ``skipped_models`` with the reason (shown by session_info, and retried on
+    next use) instead of silently vanishing.
+    """
     mdir = session._dir / "models"
     if not mdir.exists():
         return
-    # A saved foundation model unpickles only if its on-demand runtime folder is
-    # on sys.path; wiring it is a no-op when nothing was ever installed.
-    from ..service.algorithms import foundation_install
-    foundation_install.wire()
     for pkl in mdir.glob("*.pkl"):
         try:
-            # A foundation model reloads its weights while unpickling, and its
-            # library print()s; on stdio, stdout is the protocol stream.
-            with contextlib.redirect_stdout(sys.stderr):
-                data = pickle.loads(pkl.read_bytes())
-            session.workspace.table(data["table"]).models[data["name"]] = data["model"]
+            envelope = pickle.loads(pkl.read_bytes())
         except Exception as exc:
-            # A model whose table is gone or that fails to unpickle (e.g. a
-            # foundation model whose weights are no longer cached and can't be
-            # fetched) is skipped rather than breaking the whole session open —
-            # but say so, or the model just silently vanishes.
+            # Legacy files pickled the model directly; nothing to report against.
             print(f"meelu: skipped saved model {pkl.name}: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
             continue
+        try:
+            table = session.workspace.table(envelope["table"])
+        except Exception:
+            continue  # the model's table is gone
+        name = envelope["name"]
+        model, reason = load_model_envelope(envelope)
+        if model is not None:
+            table.models[name] = model
+        else:
+            table.skipped_models[name] = {"reason": reason, "path": str(pkl),
+                                          "backend": envelope.get("backend")}
+
+
+def load_model_envelope(envelope: dict) -> tuple[Any, str | None]:
+    """(model, None) or (None, reason) for one saved-model envelope."""
+    from ..service.algorithms import foundation, foundation_install
+    from ..service.algorithms.supervised import FOUNDATION_BACKENDS
+
+    if "model_pickle" not in envelope:  # legacy envelope: model already unpickled
+        return envelope.get("model"), None
+    if envelope.get("backend") in FOUNDATION_BACKENDS:
+        # The only place a saved session puts the on-demand runtime on sys.path:
+        # when it actually holds a foundation model.
+        if not foundation_install.wire():
+            return None, f"saved {foundation.MODEL_LABEL} model. {foundation.INSTALL_HINT}"
+    try:
+        # A foundation model reloads its weights while unpickling, and its
+        # library print()s; on stdio, stdout is the protocol stream.
+        with contextlib.redirect_stdout(sys.stderr):
+            return pickle.loads(envelope["model_pickle"]), None
+    except Exception as exc:
+        return None, foundation.describe_failure(exc)
 
 
 def _write_meta(session: Session) -> None:
