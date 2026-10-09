@@ -15,7 +15,7 @@ Start here if you are new: **[Getting started](getting-started.md)**.
 
 ## Tool reference
 
-The [tool reference index](tools/README.md) lists all 45 tools. By category:
+The [tool reference index](tools/README.md) lists all 47 tools. By category:
 
 - [Session & workspace](tools/session-and-workspace.md)
 - [Column typing](tools/column-typing.md)
@@ -23,6 +23,7 @@ The [tool reference index](tools/README.md) lists all 45 tools. By category:
 - [Feature engineering](tools/feature-engineering.md)
 - [Clustering & dimensionality reduction](tools/clustering-and-dimreduction.md)
 - [Supervised machine learning](tools/supervised-ml.md)
+- [Tabular foundation model](tools/foundation-models.md)
 - [Time series](tools/time-series.md)
 - [Drivers & causal inference](tools/drivers-and-causal.md)
 - [Customer analytics](tools/customer-analytics.md)

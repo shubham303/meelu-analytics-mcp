@@ -60,9 +60,21 @@ dev = ["pytest"]
 #   dowhy    → causal_effect (backdoor estimation + refutation)
 #   ruptures → detect_changepoints (time-series change detection)
 insights = ["mlxtend", "dowhy", "ruptures"]
+# Optional PREINSTALL of the tabular foundation model (TabICL v2, BSD-3).
+# Normally it is installed on demand, at runtime, by the install_foundation_model
+# tool into <TABULAR_BASE>/.deps/foundation — never as part of the server install.
+# See docs/tools/foundation-models.md. transformers is only needed for fine-tuning.
+foundation = ["tabicl>=2.2,<2.3", "transformers>=4.46,<6"]
 
 [project.scripts]
 meelu-analytics-mcp = "tabint.app.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv]
+# Lockfile-only: torch 2.12+ ships macOS wheels for 14.0+ only, so a universal
+# lock that picks it breaks `uv sync --extra foundation` on macOS 13. Published
+# metadata is unaffected — `pip install` / `uv tool install` resolve per machine
+# and pick the newest wheel that fits.
+constraint-dependencies = ["torch<2.12; sys_platform == 'darwin'"]

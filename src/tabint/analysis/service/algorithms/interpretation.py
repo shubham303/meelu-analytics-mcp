@@ -3,6 +3,12 @@
 feature_importance uses permutation importance (model-agnostic, computed on the
 held-out test split) over the original feature columns. explain_prediction uses
 SHAP for a single row. Libraries: scikit-learn (permutation), shap.
+
+Foundation-model backends (TabICL) re-read the whole training context on every
+predict call — a few seconds on a CPU regardless of how many rows are scored. So
+for them both explainers batch: permutation importance scores every shuffled
+copy in ONE predict call, and SHAP uses a small fixed background and a capped
+evaluation budget. Same quantities, budgets recorded in the result's metadata.
 """
 from __future__ import annotations
 
@@ -21,6 +27,15 @@ from ....shared.results import Result
 shap = _lazy_import("shap")
 
 _RANDOM_STATE = 0
+_N_REPEATS = 10
+# Foundation models: fewer repeats (each costs a pass over the test split) and a
+# small SHAP background; see the module docstring.
+_FOUNDATION_N_REPEATS = 5
+_FOUNDATION_SHAP_BACKGROUND = 20
+# Batched importance scores n_test × (1 + features × repeats) rows; cap the test
+# rows it uses and the rows sent per predict call so a large table stays bounded.
+_FOUNDATION_IMPORTANCE_MAX_ROWS = 1_000
+_FOUNDATION_PREDICT_CHUNK = 50_000
 
 
 def feature_importance(model: Any) -> Result:
@@ -38,14 +53,24 @@ def feature_importance(model: Any) -> Result:
         Result with per-feature importance, sorted most-important first.
     """
     X_test, y_test = model._X_test, model._y_test
-    result = permutation_importance(
-        model._pipeline, X_test, y_test,
-        n_repeats=10, random_state=_RANDOM_STATE,
-    )
-    importances = {
-        feat: float(mean)
-        for feat, mean in zip(model._feature_names, result.importances_mean)
-    }
+    foundation_model = getattr(model, "is_foundation", False)
+    if foundation_model:
+        n_repeats = _FOUNDATION_N_REPEATS
+        if len(X_test) > _FOUNDATION_IMPORTANCE_MAX_ROWS:
+            keep = np.random.RandomState(_RANDOM_STATE).choice(
+                len(X_test), _FOUNDATION_IMPORTANCE_MAX_ROWS, replace=False)
+            X_test, y_test = X_test.iloc[np.sort(keep)], y_test.iloc[np.sort(keep)]
+        importances = _batched_permutation_importance(model, X_test, y_test, n_repeats)
+    else:
+        n_repeats = _N_REPEATS
+        result = permutation_importance(
+            model._pipeline, X_test, y_test,
+            n_repeats=n_repeats, random_state=_RANDOM_STATE,
+        )
+        importances = {
+            feat: float(mean)
+            for feat, mean in zip(model._feature_names, result.importances_mean)
+        }
     ranked = dict(sorted(importances.items(), key=lambda kv: kv[1], reverse=True))
     top = next(iter(ranked), None)
 
@@ -69,7 +94,9 @@ def feature_importance(model: Any) -> Result:
         metadata={
             "target": model._target,
             "task": model._task,
-            "n_repeats": 10,
+            "backend": getattr(model, "_backend", "gbt"),
+            "n_repeats": n_repeats,
+            "n_rows_scored": n_test,
             "measure": "mean_score_decrease",
         },
         trust=trust,
@@ -101,26 +128,35 @@ def explain_prediction(model: Any, row: Any) -> Result:
     x_row = pre.transform(row_df)
     encoded_names = list(pre.get_feature_names_out())
 
-    # TreeExplainer is exact and fast for the gradient-boosted default; fall back
-    # to the model-agnostic explainer if a non-tree estimator is ever swapped in.
-    try:
-        explainer = shap.TreeExplainer(estimator, background, feature_names=encoded_names)
-        explanation = explainer(x_row)
-    except Exception:
-        if model._task == "classification":
-            f = lambda data: estimator.predict_proba(data)
-        else:
-            f = lambda data: estimator.predict(data)
-        explainer = shap.Explainer(f, background, feature_names=encoded_names)
-        explanation = explainer(x_row)
+    if getattr(model, "is_foundation", False):
+        explanation, budget = _foundation_shap(model, estimator, background, x_row, encoded_names)
+        method, basis = "shap_permutation", f"permutation SHAP, {budget}"
+    else:
+        # TreeExplainer is exact and fast for the gradient-boosted default; fall
+        # back to the model-agnostic explainer if a non-tree estimator is swapped in.
+        method, basis, budget = "shap", "local SHAP explanation", None
+        try:
+            explainer = shap.TreeExplainer(estimator, background, feature_names=encoded_names)
+            explanation = explainer(x_row)
+        except Exception:
+            if model._task == "classification":
+                f = lambda data: estimator.predict_proba(data)
+            else:
+                f = lambda data: estimator.predict(data)
+            explainer = shap.Explainer(f, background, feature_names=encoded_names)
+            explanation = explainer(x_row)
 
     values = np.asarray(explanation.values)[0]
     base = np.asarray(explanation.base_values)[0]
-    # Multiclass → collapse to the class with the largest total contribution.
+    # Multiclass → collapse to the class with the largest total contribution
+    # (argmax takes the first on a tie, so the pick is deterministic).
+    classes = list(getattr(estimator, "classes_", []))
+    explained_class = classes[1] if len(classes) == 2 else None
     if values.ndim > 1:
         cls = int(np.argmax(np.abs(values).sum(axis=0)))
         values = values[:, cls]
         base = base[cls] if np.ndim(base) else base
+        explained_class = classes[cls] if cls < len(classes) else cls
 
     contributions = _aggregate_to_columns(
         pre, values,
@@ -130,19 +166,105 @@ def explain_prediction(model: Any, row: Any) -> Result:
 
     # Honesty seam — a local explanation is well-grounded (exact SHAP on this row),
     # but it is specific to this row, not a global rule. Moderate by default.
+    caveats = ["This explains ONE prediction locally (SHAP) — it's specific to this row, "
+               "not a global rule."]
+    if budget:
+        caveats.append(
+            f"Approximate SHAP for a foundation model ({budget}) — contribution sizes are "
+            "estimates; their ranking is more reliable than their exact values."
+        )
     trust = honesty.with_caveats(
-        honesty.Trust(level=honesty.TrustLevel.MODERATE, basis=["local SHAP explanation"]),
-        "This explains ONE prediction locally (SHAP) — it's specific to this row, "
-        "not a global rule.",
+        honesty.Trust(level=honesty.TrustLevel.MODERATE, basis=[basis]),
+        *caveats,
     )
 
+    metadata = {"target": model._target, "task": model._task,
+                "backend": getattr(model, "_backend", "gbt")}
+    if explained_class is not None:
+        metadata["explained_class"] = explained_class
+    if budget:
+        metadata["approximation"] = budget
     return Result(
-        method="shap",
+        method=method,
         summary=f"Top driver: {next(iter(ranked), None)}",
         values={"contributions": ranked, "base_value": float(np.ravel(base)[0])},
-        metadata={"target": model._target, "task": model._task},
+        metadata=metadata,
         trust=trust,
     )
+
+
+def _batched_permutation_importance(
+    model: Any, X_test: pd.DataFrame, y_test: pd.Series, n_repeats: int
+) -> dict[str, float]:
+    """Permutation importance with every shuffled copy scored in one predict call.
+
+    Same quantity as sklearn's ``permutation_importance`` with the estimator's
+    default score (accuracy / R²): the mean score drop when one original column
+    is shuffled. Batching matters because a foundation model's cost is per call,
+    not per row.
+    """
+    from sklearn.metrics import accuracy_score, r2_score
+
+    score = accuracy_score if model._task == "classification" else r2_score
+    rng = np.random.RandomState(_RANDOM_STATE)
+    X_base = X_test[model._feature_names].reset_index(drop=True)
+    y_true = np.asarray(y_test)
+    n = len(X_base)
+
+    copies = [X_base]
+    for feat in model._feature_names:
+        for _ in range(n_repeats):
+            shuffled = X_base.copy()
+            # .iloc keeps the column's dtype (categorical/extension types survive).
+            shuffled[feat] = X_base[feat].iloc[rng.permutation(n)].to_numpy()
+            shuffled[feat] = shuffled[feat].astype(X_base[feat].dtype)
+            copies.append(shuffled)
+    stacked = pd.concat(copies, ignore_index=True)
+    preds = np.concatenate([
+        np.asarray(model.predict(stacked.iloc[i:i + _FOUNDATION_PREDICT_CHUNK]))
+        for i in range(0, len(stacked), _FOUNDATION_PREDICT_CHUNK)
+    ])
+
+    baseline = score(y_true, preds[:n])
+    importances: dict[str, float] = {}
+    for i, feat in enumerate(model._feature_names):
+        drops = []
+        for r in range(n_repeats):
+            start = n * (1 + i * n_repeats + r)
+            drops.append(baseline - score(y_true, preds[start:start + n]))
+        importances[feat] = float(np.mean(drops))
+    return importances
+
+
+def _foundation_shap(model: Any, estimator: Any, background: np.ndarray, x_row: np.ndarray,
+                     encoded_names: list[str]):
+    """Permutation SHAP over a small fixed background, in a handful of predict calls."""
+    from . import foundation
+
+    rng = np.random.RandomState(_RANDOM_STATE)
+    if len(background) > _FOUNDATION_SHAP_BACKGROUND:
+        background = background[rng.choice(len(background), _FOUNDATION_SHAP_BACKGROUND,
+                                           replace=False)]
+    if model._task == "classification" and len(estimator.classes_) == 2:
+        # Binary: explain P(positive class) — the same quantity TreeExplainer
+        # explains for trees. Explaining both columns would tie (they are exact
+        # negatives) and the "dominant" class would be decided by float noise.
+        f = lambda data: estimator.predict_proba(data)[:, 1]
+    elif model._task == "classification":
+        f = lambda data: estimator.predict_proba(data)
+    else:
+        f = lambda data: estimator.predict(data)
+    # The permutation explainer needs at least 2·features+1 evaluations for one
+    # pass; a large batch size turns those into very few model calls.
+    max_evals = 2 * len(encoded_names) + 1
+    explainer = shap.PermutationExplainer(
+        f, shap.maskers.Independent(background, max_samples=len(background)),
+        feature_names=encoded_names, seed=_RANDOM_STATE,
+    )
+    with foundation.quiet():
+        explanation = explainer(x_row, max_evals=max_evals, batch_size=max_evals)
+    budget = f"{len(background)}-row background, {max_evals} evaluations"
+    return explanation, budget
 
 
 def _aggregate_to_columns(

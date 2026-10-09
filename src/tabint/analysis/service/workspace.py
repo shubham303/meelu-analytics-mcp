@@ -42,6 +42,7 @@ from .algorithms import (
 )
 from ...shared.identity import _lazy_import
 from .relationships import find_join_edge
+from ...shared import honesty
 from ...shared.results import Result
 
 ibis = _lazy_import("ibis")
@@ -346,6 +347,15 @@ class Table:
         self.models[name or target] = model
         return model
 
+    def finetune_foundation_model(
+        self, target: str, task: str, name: str | None = None, max_seconds: float = 120
+    ) -> Any:
+        model = supervised.finetune(self, target, task, max_seconds)
+        if isinstance(model, Result):  # honesty seam declined — nothing to register
+            return model
+        self.models[name or target] = model
+        return model
+
     def evaluate(self, model_name: str) -> Result:
         return supervised.evaluate(self, self._model(model_name))
 
@@ -355,11 +365,24 @@ class Table:
         preds = model.predict(frame[model._feature_names])
         col = column_name or f"{model_name}_pred"
         self.write_back_column(col, list(preds))
+        backend = getattr(model, "_backend", "gbt")
+        caveat = (
+            "Predictions for rows the model trained on are optimistic — use evaluate "
+            "for honest accuracy."
+        )
+        if getattr(model, "is_foundation", False):
+            caveat = (
+                "Rows the model trained on were in the foundation model's context, so "
+                "their predictions are close to their known labels — only rows outside "
+                "training (and evaluate's held-out score) show real accuracy."
+            )
         return Result(
             method="add_predictions",
             summary=f"Wrote {len(preds)} predictions to column {col!r}",
             values={"column": col, "n": int(len(preds))},
-            metadata={"model": model_name, "table": self.name},
+            metadata={"model": model_name, "table": self.name, "backend": backend},
+            trust=honesty.with_caveats(
+                getattr(model, "_trust", None) or honesty.unassessed(), caveat),
         )
 
     # --- interpretation --------------------------------------------------- #

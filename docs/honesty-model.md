@@ -11,7 +11,7 @@ and the cost of that asymmetry rises with the stakes: a bad causal estimate can
 justify a bad decision for months.
 
 So confidence is not an afterthought bolted onto the interesting tools. It is
-part of the return contract of all 45.
+part of the return contract of all 47.
 
 ## The trust block
 

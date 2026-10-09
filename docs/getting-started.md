@@ -132,5 +132,5 @@ question. Report the refusal — never substitute a number. See the
 ## Where to go next
 
 - [Session model](session-model.md) — multiple tables, joins, the one-table rule
-- [Tool reference](tools/README.md) — all 45 tools
+- [Tool reference](tools/README.md) — all 47 tools
 - [Configuration](configuration.md) — storage layout and optional extras

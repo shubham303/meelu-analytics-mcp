@@ -497,31 +497,96 @@ def reduce_dimensions(session_key: str, table: str, method: str = "pca", n_compo
 
 @mcp.tool()
 def train_classifier(
-    session_key: str, table: str, target: str, name: str | None = None, backend: str = "gbt"
+    session_key: str, table: str, target: str, name: str | None = None, backend: str = "auto"
 ) -> dict:
     """Train a classifier on a table and persist it under `name` (default: target).
 
-    backend: "gbt" (default gradient-boosted trees) or "tabicl" (TabICL v2
-    foundation model — no per-task training, strong on small/medium tables,
-    needs the optional `tabicl` dependency).
+    backend: "auto" (default — leave it), "gbt" (gradient-boosted trees) or
+    "tabicl" (TabICL v2 tabular foundation model: pre-trained, no per-task
+    training, usually more accurate on small/medium tables). "auto" uses the
+    foundation model when it is installed and the table is within its envelope
+    (<=10k rows, <=500 encoded features, <=10 classes), otherwise trees;
+    `metadata.backend_selection` records the choice and why.
+
+    If the response has a `hint`, the foundation model would have been used but
+    is not installed: you may call install_foundation_model, wait for 'ready',
+    and train again for a likely better model.
+
+    Returns the model plus its held-out metrics and a `trust` block — report the
+    trust level and caveats with any prediction you make from this model.
     """
     return _train(session_key, table, target, name, "classification", backend)
 
 
 @mcp.tool()
 def train_regressor(
-    session_key: str, table: str, target: str, name: str | None = None, backend: str = "gbt"
+    session_key: str, table: str, target: str, name: str | None = None, backend: str = "auto"
 ) -> dict:
     """Train a regressor on a table and persist it under `name` (default: target).
 
-    backend: "gbt" (default gradient-boosted trees) or "tabicl" (TabICL v2
-    foundation model — needs the optional `tabicl` dependency).
+    backend: "auto" (default — leave it), "gbt" or "tabicl" (TabICL v2 foundation
+    model). Selection rule, `hint`, and held-out trust work exactly as in
+    train_classifier.
     """
     return _train(session_key, table, target, name, "regression", backend)
 
 
+@mcp.tool()
+def finetune_foundation_model(
+    session_key: str,
+    table: str,
+    target: str,
+    task: str,
+    name: str | None = None,
+    max_seconds: int = 120,
+) -> dict:
+    """Fine-tune the TabICL v2 foundation model's weights on one table.
+
+    Usually unnecessary — train_classifier / train_regressor already use the
+    pre-trained foundation model with no training. Use this only when asked to
+    fine-tune, or when that model's held-out score is disappointing.
+    task: "classification" or "regression". max_seconds: hard time budget
+    (capped at 600). Declines if the foundation model is not installed (see
+    install_foundation_model) or above 5,000 rows.
+    The result compares fine-tuned vs pre-trained on the same held-out split;
+    the saved model works with evaluate, add_predictions, feature_importance and
+    explain_prediction like any other.
+    """
+    session = _get(session_key)
+    handle = session.table(table)
+    model_name = name or target
+    model = handle.finetune_foundation_model(target, task, name=model_name, max_seconds=max_seconds)
+    return _trained(session, handle, table, model_name, target, task, model)
+
+
+@mcp.tool()
+def install_foundation_model(wait_seconds: int = 0) -> dict:
+    """Install the optional TabICL v2 foundation model, in the background.
+
+    One-time setup: downloads PyTorch (CPU) and TabICL into the data folder plus
+    ~220 MB of model weights — usually a few minutes. Returns immediately with
+    `state`: "installing", "ready", "failed" (with `reason`) or "not_installed".
+    Call again to check progress (a failed install is retried); `wait_seconds`
+    (max 120) blocks that long for it to finish first. Once "ready", re-run
+    train_classifier / train_regressor and the foundation model is used.
+    """
+    from tabint.analysis.service.algorithms import foundation_install
+
+    status = foundation_install.start()
+    if status["state"] == "installing" and wait_seconds > 0:
+        foundation_install.wait(min(float(wait_seconds), 120.0))
+        status = foundation_install.status()
+    next_step = {
+        "ready": "Installed. Re-run train_classifier / train_regressor; backend 'auto' will use it.",
+        "installing": "Still installing — call install_foundation_model again in a minute.",
+        "failed": "Install failed (see reason). Call install_foundation_model again to retry; "
+                  "training keeps working with gradient-boosted trees meanwhile.",
+    }.get(status["state"], "")
+    return {**_jsonable(status), "next_step": next_step}
+
+
 def _train(
-    session_key: str, table: str, target: str, name: str | None, task: str, backend: str = "gbt"
+    session_key: str, table: str, target: str, name: str | None, task: str, backend: str = "auto"
 ) -> dict:
     session = _get(session_key)
     handle = session.table(table)
@@ -530,11 +595,34 @@ def _train(
         model = handle.train_classifier(target, name=model_name, backend=backend)
     else:
         model = handle.train_regressor(target, name=model_name, backend=backend)
+    return _trained(session, handle, table, model_name, target, task, model)
+
+
+def _trained(session, handle, table: str, model_name: str, target: str, task: str, model) -> dict:
+    """Persist a freshly trained model and report it with its held-out evaluation.
+
+    The trust block is the evaluation's — the model's own trust folded with how it
+    actually scored on rows it never saw — so a caller never gets a model without
+    knowing how far to believe it.
+    """
     if isinstance(model, Result):  # honesty seam declined training — surface it, don't save
         return _result(model)
     persistence.save_model(session, table, model_name, model)
-    return {"model_name": model_name, "table": table, "target": target, "task": task,
-            "backend": backend, "features": model._feature_names}
+    held_out = _result(handle.evaluate(model_name))
+    backend = model._backend
+    hint = model._selection.get("hint")
+    return {
+        "model_name": model_name, "table": table, "target": target, "task": task,
+        "backend": backend, "features": model._feature_names,
+        "method": f"{task}:{backend}",
+        "summary": f"Trained {backend} {task} model {model_name!r}; held-out {held_out['summary']}",
+        "trust": held_out["trust"],
+        "declined": held_out["declined"],
+        "held_out_metrics": held_out["values"],
+        "metadata": {"backend_selection": _jsonable(model._selection),
+                     "n_test": held_out["metadata"]["n_test"]},
+        **({"hint": hint} if hint else {}),
+    }
 
 
 @mcp.tool()

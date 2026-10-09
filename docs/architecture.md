@@ -13,7 +13,7 @@ src/tabint/
     serialize.py           #   Result → JSON for the wire
     identity.py            #   session/table identity
   analysis/
-    tools.py               # all 45 @mcp.tool() definitions — the MCP surface
+    tools.py               # all 47 @mcp.tool() definitions — the MCP surface
     session.py             # the Session facade tools call
     db/
       ducktable.py         #   the DuckDB/ibis table handle

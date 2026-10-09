@@ -455,6 +455,11 @@ def main() -> int:
     say(f"Put a CSV in {C.B}{data_dir}{C.X}, then ask your assistant:")
     say(f'  {C.D}"Using meelu, load orders.csv and tell me what\'s in it."{C.X}')
     say()
+    # The tabular foundation model is deliberately NOT installed here (PyTorch is
+    # hundreds of MB); the server installs it on demand when an agent asks.
+    say(f"{C.D}For sharper predictions, ask it to \"install the foundation model\" — a "
+        f"one-time background download, only if you want it.{C.X}")
+    say()
     if failed:
         say(f"{C.D}For anything that failed, `--print-config` gives you the JSON to paste in.{C.X}")
         return 1

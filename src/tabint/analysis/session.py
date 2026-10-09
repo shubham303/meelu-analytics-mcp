@@ -179,6 +179,11 @@ class Session:
     def train_regressor(self, target: str, name: str | None = None, backend: str = "gbt") -> Any:
         return self._sole().train_regressor(target, name, backend=backend)
 
+    def finetune_foundation_model(
+        self, target: str, task: str, name: str | None = None, max_seconds: float = 120
+    ) -> Any:
+        return self._sole().finetune_foundation_model(target, task, name, max_seconds)
+
     def evaluate(self, model_name: str) -> Result:
         return self._sole().evaluate(model_name)
 
