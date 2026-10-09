@@ -15,11 +15,21 @@ server. See docs/tools/foundation-models.md for the full comparison.
 This module owns everything foundation-specific so supervised.py stays a router
 (installation itself lives in ``foundation_install``):
 
-* ``available()`` — are the packages AND weights installed (no heavy import)?
+* ``available()`` — are the packages AND weights installed (no import, no wiring)?
 * ``select_backend()`` — the deterministic ``backend="auto"`` rule, recorded.
-* ``make_estimator()`` / ``make_finetuner()`` — pinned checkpoint, CPU, seed.
+* ``make_estimator()`` / ``make_finetuner()`` — pinned checkpoint, CPU, seed,
+  downloads disabled; the only places the runtime folder joins ``sys.path``.
 * ``quiet()`` — tabicl ``print()``s download notices; on a stdio transport
   stdout IS the JSON-RPC stream, so every call into it is redirected to stderr.
+
+CPU latency budget. Every TabICL predict call re-reads its whole training
+context, and on a laptop CPU its cost grows with context rows × features
+(measured on an 8 GB Apple-silicon laptop, 4 threads, 8 estimators: ~10 s for
+1,500 context rows × 10 features, ~35 s at × 40 features, and only ~40 rows/s of
+query throughput). FastMCP runs tools on its event loop, so a slow call freezes
+the whole server. The envelope below therefore comes from a latency budget —
+every foundation tool call should finish in about a minute on a CPU — not from
+the model's accuracy ceiling.
 """
 from __future__ import annotations
 
@@ -35,20 +45,31 @@ MODEL_LABEL = "TabICL v2"
 
 _RANDOM_STATE = 0
 
-# The automatic rule only picks the foundation model inside the envelope where it
-# is both strong and quick on a CPU (~5s to fit and score 1k rows on a laptop).
-# Explicit backend="tabicl" may go further, up to the model's stated ceilings.
-AUTO_MAX_ROWS = 10_000
-AUTO_MAX_FEATURES = 500
-AUTO_MAX_CLASSES = 10
-MAX_ROWS = 100_000
-MAX_FEATURES = 2_000
+# Ensemble size. TabICL's default is 8; on a CPU 4 halves every call's cost for a
+# small accuracy loss. Importance/SHAP rescore many perturbed copies, so they use
+# a 2-member refit of the same model (see interpretation.py).
+N_ESTIMATORS_CPU = 4
+N_ESTIMATORS_GPU = 8
+N_ESTIMATORS_EXPLAIN = 2
 
-# Fine-tuning runs real gradient steps; on a CPU that is only reasonable on small
-# tables and inside a hard time budget.
-FINETUNE_MAX_ROWS = 5_000
-FINETUNE_DEFAULT_SECONDS = 120
-FINETUNE_MAX_SECONDS = 600
+# The envelope (CPU). Rows are usable training rows (75% become the context);
+# "cells" = rows × encoded features, which is what per-call cost tracks. At the
+# edge: train + held-out scoring ≈ 20 s, add_predictions on the whole table
+# ≈ 30 s. The same limits bound explicit backend="tabicl" — beyond them every
+# call would take minutes. A GPU (MEELU_FOUNDATION_DEVICE=cuda) lifts them.
+AUTO_MAX_ROWS = 2_000
+AUTO_MAX_CELLS = 30_000
+AUTO_MAX_CLASSES = 10
+_GPU_SCALE = 25
+# Most rows add_predictions will score in one call (the table may hold rows the
+# model didn't train on, e.g. missing targets).
+PREDICT_MAX_ROWS = 4_000
+
+# Fine-tuning runs real gradient steps plus two held-out scorings; on a CPU that
+# fits the one-minute budget only on small tables and a short time limit.
+FINETUNE_MAX_ROWS = 1_000
+FINETUNE_DEFAULT_SECONDS = 20
+FINETUNE_MAX_SECONDS = 30
 FINETUNE_EPOCHS = 10
 
 INSTALL_HINT = (
@@ -62,9 +83,9 @@ _AUTO_INSTALL_ENV = "MEELU_FOUNDATION_AUTO_INSTALL"
 
 
 def available() -> bool:
-    """True when the packages are importable AND the weights are cached, so a
-    training call never starts a large download. Uses find_spec and a cache
-    lookup — never pays torch's import cost just to answer the question."""
+    """True when the packages are present AND the weights are cached, so a
+    training call never starts a large download. A stamp + cache lookup — no
+    torch import, and the runtime folder is NOT put on sys.path."""
     return foundation_install.installed()
 
 
@@ -74,11 +95,43 @@ def device() -> str:
     return os.environ.get("MEELU_FOUNDATION_DEVICE", "cpu")
 
 
+def _scale() -> int:
+    return 1 if device() == "cpu" else _GPU_SCALE
+
+
+def max_rows() -> int:
+    return AUTO_MAX_ROWS * _scale()
+
+
+def max_cells() -> int:
+    return AUTO_MAX_CELLS * _scale()
+
+
+def predict_max_rows() -> int:
+    return PREDICT_MAX_ROWS * _scale()
+
+
+def n_estimators() -> int:
+    return N_ESTIMATORS_CPU if device() == "cpu" else N_ESTIMATORS_GPU
+
+
 @contextlib.contextmanager
 def quiet() -> Iterator[None]:
     """Send anything the foundation library prints to stderr, not stdout."""
     with contextlib.redirect_stdout(sys.stderr):
         yield
+
+
+def runtime_info() -> dict[str, Any]:
+    """What a foundation result was produced with — device, checkpoints, ensemble
+    size and library versions — for the result's metadata."""
+    return {
+        "device": device(),
+        "n_estimators": n_estimators(),
+        "checkpoints": {"classification": CLASSIFIER_CHECKPOINT,
+                        "regression": REGRESSOR_CHECKPOINT},
+        **{f"{k}_version": v for k, v in foundation_install.runtime_versions().items()},
+    }
 
 
 def select_backend(
@@ -94,22 +147,24 @@ def select_backend(
     """
     checks = {
         "foundation_installed": available(),
+        "device": device(),
         "n_rows": int(n_rows),
         "n_encoded_features": int(n_features),
+        "n_cells": int(n_rows) * int(n_features),
         "n_classes": None if n_classes is None else int(n_classes),
-        "auto_limits": {"rows": AUTO_MAX_ROWS, "features": AUTO_MAX_FEATURES,
+        "auto_limits": {"rows": max_rows(), "cells": max_cells(),
                         "classes": AUTO_MAX_CLASSES},
     }
     if requested != "auto":
         return {"requested": requested, "chosen": requested,
                 "reason": f"backend={requested!r} requested explicitly.", "checks": checks}
 
-    in_envelope = _envelope_problem(task, n_rows, n_features, n_classes) is None
+    problem = _envelope_problem(task, n_rows, n_features, n_classes)
     if not checks["foundation_installed"]:
         reason = f"{MODEL_LABEL} foundation model not installed — using gradient-boosted trees."
-        if not in_envelope:
-            reason += " " + _envelope_problem(task, n_rows, n_features, n_classes)
-            return {"requested": "auto", "chosen": "gbt", "reason": reason, "checks": checks}
+        if problem is not None:
+            return {"requested": "auto", "chosen": "gbt", "reason": f"{reason} {problem}",
+                    "checks": checks}
         out = {"requested": "auto", "chosen": "gbt", "reason": reason, "checks": checks,
                "hint": INSTALL_HINT}
         if os.environ.get(_AUTO_INSTALL_ENV) == "1":
@@ -117,24 +172,24 @@ def select_backend(
             out["hint"] = (f"{_AUTO_INSTALL_ENV}=1: background install is {state}; check "
                            "it with install_foundation_model and retrain once it is 'ready'.")
         return out
-    problem = _envelope_problem(task, n_rows, n_features, n_classes)
     if problem is None:
         return {"requested": "auto", "chosen": "tabicl",
-                "reason": (f"{MODEL_LABEL} installed and the table is within its "
-                           f"envelope (≤{AUTO_MAX_ROWS:,} rows, ≤{AUTO_MAX_FEATURES} "
-                           f"features, ≤{AUTO_MAX_CLASSES} classes) — using {MODEL_LABEL}."),
+                "reason": (f"{MODEL_LABEL} installed and the table is within its CPU "
+                           f"envelope (≤{max_rows():,} rows, ≤{max_cells():,} rows×features, "
+                           f"≤{AUTO_MAX_CLASSES} classes) — using {MODEL_LABEL}."),
                 "checks": checks}
     return {"requested": "auto", "chosen": "gbt", "reason": problem, "checks": checks}
 
 
 def _envelope_problem(task: str, n_rows: int, n_features: int, n_classes: int | None) -> str | None:
     """Why ``auto`` should not use the foundation model on this shape, or None."""
-    if n_rows > AUTO_MAX_ROWS:
-        return (f"{n_rows:,} rows exceeds the foundation model's CPU budget "
-                f"({AUTO_MAX_ROWS:,}) — using gradient-boosted trees.")
-    if n_features > AUTO_MAX_FEATURES:
-        return (f"{n_features:,} encoded features exceeds {AUTO_MAX_FEATURES:,} — "
-                "using gradient-boosted trees.")
+    if n_rows > max_rows():
+        return (f"{n_rows:,} rows exceeds the foundation model's {device().upper()} latency "
+                f"budget ({max_rows():,}) — using gradient-boosted trees.")
+    if n_rows * n_features > max_cells():
+        return (f"{n_rows:,} rows × {n_features:,} encoded features exceeds the foundation "
+                f"model's {device().upper()} latency budget ({max_cells():,}) — using "
+                "gradient-boosted trees.")
     if task == "classification" and n_classes is not None and n_classes > AUTO_MAX_CLASSES:
         return (f"{n_classes} classes exceeds {AUTO_MAX_CLASSES} — "
                 "using gradient-boosted trees.")
@@ -142,34 +197,43 @@ def _envelope_problem(task: str, n_rows: int, n_features: int, n_classes: int | 
 
 
 def limit_problem(n_rows: int, n_features: int) -> str | None:
-    """Why an explicit foundation request can't run on this table, or None."""
-    if n_rows > MAX_ROWS:
-        return (f"{MODEL_LABEL} supports up to ~{MAX_ROWS:,} rows on this server; the table "
-                f"has {n_rows:,}. Use backend='gbt' for larger tables.")
-    if n_features > MAX_FEATURES:
-        return (f"{MODEL_LABEL} supports up to ~{MAX_FEATURES:,} features; the table has "
-                f"{n_features:,} after encoding. Use backend='gbt' instead.")
+    """Why an explicit foundation request can't run on this table, or None.
+    Same latency budget as ``auto`` (classes aside) — past it, every call on a
+    CPU would take minutes and freeze the server meanwhile."""
+    if n_rows > max_rows() or n_rows * n_features > max_cells():
+        return (f"{MODEL_LABEL} on {device().upper()} is limited to {max_rows():,} rows and "
+                f"{max_cells():,} rows×features here (this table: {n_rows:,} × {n_features:,}) "
+                "— beyond that each call takes minutes. Use backend='gbt', or a GPU via "
+                "MEELU_FOUNDATION_DEVICE=cuda.")
     return None
 
 
-def make_estimator(task: str) -> Any:
-    """Unfitted TabICL estimator: pinned checkpoint, fixed seed, explicit device.
+def _load() -> None:
+    """Put the on-demand runtime on sys.path — the only time it joins."""
+    if not foundation_install.wire():
+        raise ImportError(f"{MODEL_LABEL} runtime is not installed. {INSTALL_HINT}")
+
+
+def make_estimator(task: str, n_estimators_: int | None = None) -> Any:
+    """Unfitted TabICL estimator: pinned checkpoint, fixed seed, explicit device,
+    downloads disabled (weights come only from install_foundation_model).
 
     No KV cache: it makes repeated predictions faster but pickles to hundreds of
     MB, and every model here is persisted with the session. The pickle without it
     is ~200 KB — the weights reload from the local Hugging Face cache.
     """
+    _load()
     from tabicl import TabICLClassifier, TabICLRegressor
 
-    if task == "classification":
-        return TabICLClassifier(checkpoint_version=CLASSIFIER_CHECKPOINT,
-                                device=device(), random_state=_RANDOM_STATE)
-    return TabICLRegressor(checkpoint_version=REGRESSOR_CHECKPOINT,
-                           device=device(), random_state=_RANDOM_STATE)
+    cls, ckpt = ((TabICLClassifier, CLASSIFIER_CHECKPOINT) if task == "classification"
+                 else (TabICLRegressor, REGRESSOR_CHECKPOINT))
+    return cls(checkpoint_version=ckpt, n_estimators=n_estimators_ or n_estimators(),
+               allow_auto_download=False, device=device(), random_state=_RANDOM_STATE)
 
 
 def make_finetuner(task: str, time_limit: float) -> Any:
     """Unfitted fine-tuning estimator with CPU-safe settings and a hard time limit."""
+    _load()
     from tabicl import FinetunedTabICLClassifier, FinetunedTabICLRegressor
 
     cls, ckpt = (
@@ -182,6 +246,8 @@ def make_finetuner(task: str, time_limit: float) -> Any:
         time_limit=float(time_limit),
         early_stopping=True,
         checkpoint_version=ckpt,
+        allow_auto_download=False,
+        n_estimators_inference=n_estimators(),
         device=device(),
         # Mixed precision is a GPU speed trick; off keeps CPU runs bit-stable.
         amp=False,
@@ -196,8 +262,8 @@ def describe_failure(exc: BaseException) -> str:
     if isinstance(exc, ImportError):
         return f"The foundation model's packages could not be imported ({text}). {INSTALL_HINT}"
     if any(k in lowered for k in ("offline", "connection", "resolve", "timed out", "timeout",
-                                   "huggingface", "hf_hub", "localentrynotfound", "not cached")):
+                                   "huggingface", "hf_hub", "localentrynotfound", "not cached",
+                                   "checkpoint")):
         return (f"Could not load the {MODEL_LABEL} weights from the local cache. Call "
                 f"install_foundation_model to re-download them. ({text[:200]})")
     return f"The {MODEL_LABEL} model failed on this table ({text[:300]})."
-
