@@ -180,7 +180,7 @@ class Session:
         return self._sole().train_regressor(target, name, backend=backend)
 
     def finetune_foundation_model(
-        self, target: str, task: str, name: str | None = None, max_seconds: float = 120
+        self, target: str, task: str, name: str | None = None, max_seconds: float = 20
     ) -> Any:
         return self._sole().finetune_foundation_model(target, task, name, max_seconds)
 

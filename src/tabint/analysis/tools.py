@@ -87,11 +87,24 @@ def _staged(root: Path, resolved: list[Path]):
 
 
 def _summary(session) -> dict:
-    return {
+    out = {
         "session_key": session.id,
         "tables": session.tables,
         "relationships": _jsonable(session.relationships().model_dump()),
     }
+    # Saved models that couldn't be loaded here (e.g. a foundation model whose
+    # on-demand runtime isn't installed on this machine) — with the reason.
+    skipped = {}
+    for name in session.tables:
+        try:
+            table = session.workspace.table(name)
+        except Exception:
+            continue
+        for model, info in getattr(table, "skipped_models", {}).items():
+            skipped.setdefault(name, {})[model] = info["reason"]
+    if skipped:
+        out["unloaded_models"] = skipped
+    return out
 
 
 @mcp.tool()
@@ -505,7 +518,8 @@ def train_classifier(
     "tabicl" (TabICL v2 tabular foundation model: pre-trained, no per-task
     training, usually more accurate on small/medium tables). "auto" uses the
     foundation model when it is installed and the table is within its envelope
-    (<=10k rows, <=500 encoded features, <=10 classes), otherwise trees;
+    (CPU latency budget: <=2,000 rows, <=30,000 rows x encoded features, <=10
+    classes), otherwise trees;
     `metadata.backend_selection` records the choice and why.
 
     If the response has a `hint`, the foundation model would have been used but
@@ -538,7 +552,7 @@ def finetune_foundation_model(
     target: str,
     task: str,
     name: str | None = None,
-    max_seconds: int = 120,
+    max_seconds: int = 20,
 ) -> dict:
     """Fine-tune the TabICL v2 foundation model's weights on one table.
 
@@ -546,8 +560,9 @@ def finetune_foundation_model(
     pre-trained foundation model with no training. Use this only when asked to
     fine-tune, or when that model's held-out score is disappointing.
     task: "classification" or "regression". max_seconds: hard time budget
-    (capped at 600). Declines if the foundation model is not installed (see
-    install_foundation_model) or above 5,000 rows.
+    (capped at 30, so the call stays within about a minute on a CPU). Declines
+    if the foundation model is not installed (see
+    install_foundation_model) or above 1,000 rows.
     The result compares fine-tuned vs pre-trained on the same held-out split;
     the saved model works with evaluate, add_predictions, feature_importance and
     explain_prediction like any other.
@@ -567,14 +582,14 @@ def install_foundation_model(wait_seconds: int = 0) -> dict:
     ~220 MB of model weights — usually a few minutes. Returns immediately with
     `state`: "installing", "ready", "failed" (with `reason`) or "not_installed".
     Call again to check progress (a failed install is retried); `wait_seconds`
-    (max 120) blocks that long for it to finish first. Once "ready", re-run
+    (max 50) blocks that long for it to finish first. Once "ready", re-run
     train_classifier / train_regressor and the foundation model is used.
     """
     from tabint.analysis.service.algorithms import foundation_install
 
     status = foundation_install.start()
     if status["state"] == "installing" and wait_seconds > 0:
-        foundation_install.wait(min(float(wait_seconds), 120.0))
+        foundation_install.wait(min(float(wait_seconds), 50.0))
         status = foundation_install.status()
     next_step = {
         "ready": "Installed. Re-run train_classifier / train_regressor; backend 'auto' will use it.",

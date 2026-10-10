@@ -24,7 +24,7 @@ model and is applied identically at prediction time. That is what makes
 
 | Backend | What it is |
 |---|---|
-| `auto` (default) | TabICL v2 when it is installed and the table is within its envelope (≤10k rows, ≤500 encoded features, ≤10 classes); otherwise `gbt`. The choice and the reason are recorded in `metadata.backend_selection` |
+| `auto` (default) | TabICL v2 when it is installed and the table is within its envelope (CPU latency budget: ≤2,000 rows, ≤30,000 rows × encoded features, ≤10 classes); otherwise `gbt`. The choice and the reason are recorded in `metadata.backend_selection` |
 | `gbt` | `HistGradientBoosting` — fast, strong on tabular data, no GPU |
 | `tabicl` | TabICL v2, a pre-trained tabular foundation model. No per-task training; strong on small and medium tables. Installed on demand by `install_foundation_model`; declines (rather than substituting trees) if it is not installed |
 
@@ -65,8 +65,8 @@ concentrated in a few bad predictions rather than spread evenly.
 ## `feature_importance(session_key, table, model_name)`
 
 Permutation importance — shuffle one column, measure how much held-out
-performance drops — with 10 repeats (5 for the foundation model, batched into
-one predict call), aggregated back to the original columns.
+performance drops — with 10 repeats (3 for the foundation model, batched into
+one budget-capped predict call), aggregated back to the original columns.
 
 Aggregation matters: a categorical column becomes many one-hot columns during
 training, and importance reported per dummy is unreadable. These are summed back

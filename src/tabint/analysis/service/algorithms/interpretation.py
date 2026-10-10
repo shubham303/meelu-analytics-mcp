@@ -5,10 +5,12 @@ held-out test split) over the original feature columns. explain_prediction uses
 SHAP for a single row. Libraries: scikit-learn (permutation), shap.
 
 Foundation-model backends (TabICL) re-read the whole training context on every
-predict call — a few seconds on a CPU regardless of how many rows are scored. So
-for them both explainers batch: permutation importance scores every shuffled
-copy in ONE predict call, and SHAP uses a small fixed background and a capped
-evaluation budget. Same quantities, budgets recorded in the result's metadata.
+predict call, and score only ~40–150 rows/s on a laptop CPU. Both explainers
+therefore (1) run on a 2-member refit of the same model (``_explainer_pipeline``)
+rather than the full ensemble, (2) score every perturbed copy in one batched
+predict call, and (3) cap the TOTAL rows scored per call (``_FOUNDATION_SCORED_ROWS``)
+so the call stays within about a minute — declining, with the reason, when the
+table is too wide to explain inside that budget. Budgets go in the metadata.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.inspection import permutation_importance
 
 from ....shared import honesty
@@ -28,14 +31,13 @@ shap = _lazy_import("shap")
 
 _RANDOM_STATE = 0
 _N_REPEATS = 10
-# Foundation models: fewer repeats (each costs a pass over the test split) and a
-# small SHAP background; see the module docstring.
-_FOUNDATION_N_REPEATS = 5
+# Foundation models (see the module docstring). Total rows one explainer call may
+# score across all perturbed copies — ~30–40 s at the 2-member refit's CPU speed.
+_FOUNDATION_SCORED_ROWS = 4_000
+_FOUNDATION_N_REPEATS = 3
+_FOUNDATION_MIN_IMPORTANCE_ROWS = 30
 _FOUNDATION_SHAP_BACKGROUND = 20
-# Batched importance scores n_test × (1 + features × repeats) rows; cap the test
-# rows it uses and the rows sent per predict call so a large table stays bounded.
-_FOUNDATION_IMPORTANCE_MAX_ROWS = 1_000
-_FOUNDATION_PREDICT_CHUNK = 50_000
+_FOUNDATION_MIN_SHAP_BACKGROUND = 5
 
 
 def feature_importance(model: Any) -> Result:
@@ -54,13 +56,26 @@ def feature_importance(model: Any) -> Result:
     """
     X_test, y_test = model._X_test, model._y_test
     foundation_model = getattr(model, "is_foundation", False)
+    extra_meta: dict[str, Any] = {}
     if foundation_model:
         n_repeats = _FOUNDATION_N_REPEATS
-        if len(X_test) > _FOUNDATION_IMPORTANCE_MAX_ROWS:
-            keep = np.random.RandomState(_RANDOM_STATE).choice(
-                len(X_test), _FOUNDATION_IMPORTANCE_MAX_ROWS, replace=False)
-            X_test, y_test = X_test.iloc[np.sort(keep)], y_test.iloc[np.sort(keep)]
-        importances = _batched_permutation_importance(model, X_test, y_test, n_repeats)
+        copies = 1 + len(model._feature_names) * n_repeats
+        n_scored = min(len(X_test), _FOUNDATION_SCORED_ROWS // copies)
+        if n_scored < _FOUNDATION_MIN_IMPORTANCE_ROWS:
+            return _declined_explainer(
+                "permutation_importance", model,
+                f"{len(model._feature_names)} features × {n_repeats} shuffles would need "
+                f"{copies * _FOUNDATION_MIN_IMPORTANCE_ROWS:,} foundation-model predictions, "
+                f"above the per-call CPU budget of {_FOUNDATION_SCORED_ROWS:,}. Retrain with "
+                "backend='gbt' to rank features on a table this wide.")
+        if len(X_test) > n_scored:
+            keep = np.sort(np.random.RandomState(_RANDOM_STATE).choice(
+                len(X_test), n_scored, replace=False))
+            X_test, y_test = X_test.iloc[keep], y_test.iloc[keep]
+        pipeline, n_est = _explainer_pipeline(model)
+        importances = _batched_permutation_importance(
+            pipeline, model._feature_names, model._task, X_test, y_test, n_repeats)
+        extra_meta = {"explainer_n_estimators": n_est, "rows_scored_total": n_scored * copies}
     else:
         n_repeats = _N_REPEATS
         result = permutation_importance(
@@ -81,11 +96,14 @@ def feature_importance(model: Any) -> Result:
         getattr(model, "_trust", None),
         honesty.from_sample_size(n_test, low=30, moderate=100, label="test rows"),
     )
-    trust = honesty.with_caveats(
-        base,
-        "Importance shows what the MODEL relied on, not what CAUSES the outcome — "
-        "important features can be proxies or correlated with the real driver.",
-    )
+    caveats = ["Importance shows what the MODEL relied on, not what CAUSES the outcome — "
+               "important features can be proxies or correlated with the real driver."]
+    if foundation_model:
+        caveats.append(
+            f"Foundation model: measured on {n_test} held-out rows with {n_repeats} shuffles "
+            "each, using a smaller ensemble of the same model to fit the CPU budget — "
+            "small differences between features are noise.")
+    trust = honesty.with_caveats(base, *caveats)
 
     return Result(
         method="permutation_importance",
@@ -98,6 +116,7 @@ def feature_importance(model: Any) -> Result:
             "n_repeats": n_repeats,
             "n_rows_scored": n_test,
             "measure": "mean_score_decrease",
+            **extra_meta,
         },
         trust=trust,
     )
@@ -122,14 +141,30 @@ def explain_prediction(model: Any, row: Any) -> Result:
     features = model._feature_names
     row_df = _row_to_frame(row, features)
 
-    pre = model._pipeline.named_steps["pre"]
-    estimator = model._pipeline.named_steps["model"]
+    foundation_model = getattr(model, "is_foundation", False)
+    pipeline = model._pipeline
+    n_est = None
+    if foundation_model:
+        n_encoded = len(model._pipeline.named_steps["pre"].get_feature_names_out())
+        evals = 2 * n_encoded + 1
+        if _FOUNDATION_SCORED_ROWS // evals < _FOUNDATION_MIN_SHAP_BACKGROUND:
+            return _declined_explainer(
+                "shap_permutation", model,
+                f"{n_encoded} encoded features need {evals} SHAP evaluations per background "
+                f"row; even a {_FOUNDATION_MIN_SHAP_BACKGROUND}-row background exceeds the "
+                f"per-call CPU budget of {_FOUNDATION_SCORED_ROWS:,} foundation-model "
+                "predictions. Retrain with backend='gbt' for exact explanations on a "
+                "table this wide.")
+        pipeline, n_est = _explainer_pipeline(model)
+    pre = pipeline.named_steps["pre"]
+    estimator = pipeline.named_steps["model"]
     background = pre.transform(model._X_test[features])
     x_row = pre.transform(row_df)
     encoded_names = list(pre.get_feature_names_out())
 
-    if getattr(model, "is_foundation", False):
+    if foundation_model:
         explanation, budget = _foundation_shap(model, estimator, background, x_row, encoded_names)
+        budget = f"{budget}, {n_est}-member ensemble"
         method, basis = "shap_permutation", f"permutation SHAP, {budget}"
     else:
         # TreeExplainer is exact and fast for the gradient-boosted default; fall
@@ -193,8 +228,40 @@ def explain_prediction(model: Any, row: Any) -> Result:
     )
 
 
+def _declined_explainer(method: str, model: Any, reason: str) -> Result:
+    return Result(
+        method=method,
+        summary=f"Declined: {reason}",
+        values={},
+        metadata={"target": model._target, "task": model._task,
+                  "backend": getattr(model, "_backend", "gbt"),
+                  "scored_rows_budget": _FOUNDATION_SCORED_ROWS},
+        trust=honesty.decline(reason),
+    )
+
+
+def _explainer_pipeline(model: Any) -> tuple[Any, int | None]:
+    """The pipeline the foundation explainers score: a 2-member refit of the same
+    in-context model on its stored training split (about 4x cheaper per call
+    than the full ensemble). Fine-tuned models — whose weights a refit would
+    lose — and models saved without their training split use the model as is."""
+    from . import foundation
+
+    estimator = model._pipeline.named_steps["model"]
+    X_train = getattr(model, "_X_train", None)
+    if getattr(model, "_backend", None) != "tabicl" or X_train is None:
+        return model._pipeline, getattr(estimator, "n_estimators",
+                                        getattr(estimator, "n_estimators_inference", None))
+    pipeline = clone(model._pipeline)
+    pipeline.set_params(model__n_estimators=foundation.N_ESTIMATORS_EXPLAIN)
+    with foundation.quiet():
+        pipeline.fit(X_train, model._y_train)
+    return pipeline, foundation.N_ESTIMATORS_EXPLAIN
+
+
 def _batched_permutation_importance(
-    model: Any, X_test: pd.DataFrame, y_test: pd.Series, n_repeats: int
+    pipeline: Any, feature_names: list[str], task: str,
+    X_test: pd.DataFrame, y_test: pd.Series, n_repeats: int,
 ) -> dict[str, float]:
     """Permutation importance with every shuffled copy scored in one predict call.
 
@@ -205,29 +272,29 @@ def _batched_permutation_importance(
     """
     from sklearn.metrics import accuracy_score, r2_score
 
-    score = accuracy_score if model._task == "classification" else r2_score
+    from . import foundation
+
+    score = accuracy_score if task == "classification" else r2_score
     rng = np.random.RandomState(_RANDOM_STATE)
-    X_base = X_test[model._feature_names].reset_index(drop=True)
+    X_base = X_test[feature_names].reset_index(drop=True)
     y_true = np.asarray(y_test)
     n = len(X_base)
 
     copies = [X_base]
-    for feat in model._feature_names:
+    for feat in feature_names:
         for _ in range(n_repeats):
             shuffled = X_base.copy()
             # .iloc keeps the column's dtype (categorical/extension types survive).
             shuffled[feat] = X_base[feat].iloc[rng.permutation(n)].to_numpy()
             shuffled[feat] = shuffled[feat].astype(X_base[feat].dtype)
             copies.append(shuffled)
-    stacked = pd.concat(copies, ignore_index=True)
-    preds = np.concatenate([
-        np.asarray(model.predict(stacked.iloc[i:i + _FOUNDATION_PREDICT_CHUNK]))
-        for i in range(0, len(stacked), _FOUNDATION_PREDICT_CHUNK)
-    ])
+    # Total rows are capped by the caller, so one predict call scores them all.
+    with foundation.quiet():
+        preds = np.asarray(pipeline.predict(pd.concat(copies, ignore_index=True)))
 
     baseline = score(y_true, preds[:n])
     importances: dict[str, float] = {}
-    for i, feat in enumerate(model._feature_names):
+    for i, feat in enumerate(feature_names):
         drops = []
         for r in range(n_repeats):
             start = n * (1 + i * n_repeats + r)
@@ -242,9 +309,10 @@ def _foundation_shap(model: Any, estimator: Any, background: np.ndarray, x_row: 
     from . import foundation
 
     rng = np.random.RandomState(_RANDOM_STATE)
-    if len(background) > _FOUNDATION_SHAP_BACKGROUND:
-        background = background[rng.choice(len(background), _FOUNDATION_SHAP_BACKGROUND,
-                                           replace=False)]
+    evals = 2 * len(encoded_names) + 1
+    size = min(_FOUNDATION_SHAP_BACKGROUND, _FOUNDATION_SCORED_ROWS // evals)
+    if len(background) > size:
+        background = background[rng.choice(len(background), size, replace=False)]
     if model._task == "classification" and len(estimator.classes_) == 2:
         # Binary: explain P(positive class) — the same quantity TreeExplainer
         # explains for trees. Explaining both columns would tie (they are exact

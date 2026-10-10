@@ -5,7 +5,10 @@ The first half runs everywhere — it fakes the extra being absent or the weight
 failing to load. The second half needs the real `foundation` extra and skips
 cleanly without it.
 """
+import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -180,7 +183,7 @@ def test_batched_permutation_importance_matches_the_signal(tmp_path, monkeypatch
     monkeypatch.setattr(supervised.TrainedModel, "is_foundation", property(lambda self: True))
     fi = _tool("feature_importance")(session_key=key, table="sig", model_name="y")
     imp = fi["values"]["importances"]
-    assert fi["metadata"]["n_repeats"] == 5
+    assert fi["metadata"]["n_repeats"] == 3
     assert imp["x1"] > 0.3 and abs(imp["x2"]) < 0.05
 
 
@@ -191,7 +194,9 @@ def test_auto_rule_is_a_pure_function_of_shape(monkeypatch):
     )["chosen"]
     assert pick() == "tabicl"
     assert pick(n_rows=foundation.AUTO_MAX_ROWS + 1) == "gbt"
-    assert pick(n_features=foundation.AUTO_MAX_FEATURES + 1) == "gbt"
+    assert pick(n_rows=1_000, n_features=foundation.AUTO_MAX_CELLS // 1_000 + 1) == "gbt"
+    assert pick(n_rows=foundation.AUTO_MAX_ROWS, n_features=foundation.AUTO_MAX_CELLS
+                // foundation.AUTO_MAX_ROWS) == "tabicl"
     assert pick(n_classes=foundation.AUTO_MAX_CLASSES + 1) == "gbt"
     assert pick() == pick()
 
@@ -208,7 +213,7 @@ def test_no_skill_model_is_low_trust(tmp_path, monkeypatch):
     # Pure noise: trees can't beat always-predict-majority on this seed.
     assert out["held_out_metrics"]["accuracy"] <= out["held_out_metrics"]["baseline_accuracy"]
     assert out["trust"]["level"] == "low"
-    assert any("most common class" in c for c in out["trust"]["caveats"])
+    assert any("most common class" in c and "ROC-AUC" in c for c in out["trust"]["caveats"])
 
 
 # --------------------------------------------------------------------------- #
@@ -217,15 +222,15 @@ def test_no_skill_model_is_low_trust(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def fresh_install(tmp_path, monkeypatch):
-    """A clean install state under a temp data root, with a fake 'installed'
-    check driven only by what the (mocked) installer wrote."""
+    """A clean install state under a temp data root. The core venv's own tabicl is
+    hidden (``_core_has_runtime`` → False) so only the runtime folder counts; the
+    real stamp logic decides whether it is usable; weights are a flag."""
     monkeypatch.setattr(shared_server, "_BASE", str(tmp_path))
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(foundation_install, "_state", {
         "state": None, "step": None, "reason": None, "started_at": None, "finished_at": None})
+    monkeypatch.setattr(foundation_install, "_core_has_runtime", lambda: False)
     weights = {"cached": False}
-    marker = lambda: (foundation_install.deps_dir() / ".complete").exists()
-    monkeypatch.setattr(foundation_install, "packages_installed", lambda: marker())
     monkeypatch.setattr(foundation_install, "weights_cached", lambda: weights["cached"])
     return tmp_path, weights
 
@@ -235,34 +240,51 @@ def _completed(cmd, rc=0, err=""):
     return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=err)
 
 
-def test_install_goes_installing_then_ready(fresh_install, monkeypatch):
-    root, weights = fresh_install
-    calls = []
-
+def _fake_installer(weights, calls, delay=0.0):
+    """Stands in for uv/pip: lays down tabicl/ and torch/ in --target; the weight
+    prefetch call just flips the flag."""
     def fake_run(cmd, **kw):
         calls.append(cmd)
         assert kw["stdin"] is not None and kw["capture_output"]  # never touch stdio
         if "--target" in cmd:
+            time.sleep(delay)
             target = Path(cmd[cmd.index("--target") + 1])
-            target.mkdir(parents=True)
-            (target / "fake_pkg.py").write_text("")
-        else:  # weight prefetch
+            for pkg in ("tabicl", "torch"):
+                (target / pkg).mkdir(parents=True)
+        else:
             weights["cached"] = True
         return _completed(cmd)
+    return fake_run
 
-    monkeypatch.setattr(foundation_install.subprocess, "run", fake_run)
+
+def _write_runtime(path: Path, stamp: dict) -> None:
+    for pkg in ("tabicl", "torch"):
+        (path / pkg).mkdir(parents=True, exist_ok=True)
+    (path / ".complete").write_text(json.dumps(stamp))
+
+
+def test_install_goes_installing_then_ready(fresh_install, monkeypatch):
+    root, weights = fresh_install
+    calls = []
+    monkeypatch.setattr(foundation_install.subprocess, "run", _fake_installer(weights, calls))
     assert foundation_install.status()["state"] == "not_installed"
     first = foundation_install.start()
     assert first["state"] in ("installing", "ready")
     foundation_install.wait(10)
     final = foundation_install.status()
     assert final["state"] == "ready", final
-    assert (root / ".deps" / "foundation" / ".complete").exists()
+    stamp = json.loads((root / ".deps" / "foundation" / ".complete").read_text())
+    assert stamp == foundation_install.expected_stamp()
     install_cmd = calls[0]
     assert "tabicl>=2.2,<2.3" in install_cmd and "--constraint" in install_cmd
-    pins = Path(install_cmd[install_cmd.index("--constraint") + 1])
-    assert not pins.exists()  # staging cleaned up after the rename
     assert not list((root / ".deps").glob("foundation.tmp-*"))
+
+
+def test_constraints_pin_every_core_distribution(tmp_path):
+    pins = foundation_install._write_constraints(tmp_path / "c.txt").read_text().splitlines()
+    names = {line.split("==")[0] for line in pins}
+    assert {"numpy", "scikit-learn", "pandas", "scipy", "duckdb"} <= names
+    assert "meelu-analytics-mcp" not in names
 
 
 def test_failed_install_reports_the_reason_and_leaves_nothing_behind(fresh_install, monkeypatch):
@@ -278,6 +300,96 @@ def test_failed_install_reports_the_reason_and_leaves_nothing_behind(fresh_insta
     assert not list((root / ".deps").glob("foundation.tmp-*"))
 
 
+def test_failed_is_not_sticky_once_everything_is_present(fresh_install, monkeypatch):
+    _, weights = fresh_install
+    foundation_install._state.update(state="failed", reason="earlier network error")
+    _write_runtime(foundation_install.deps_dir(), foundation_install.expected_stamp())
+    weights["cached"] = True
+    assert foundation_install.status()["state"] == "ready"
+    assert foundation_install.start()["state"] == "ready"
+    assert foundation_install._state["state"] == "ready"
+
+
+def test_a_stale_runtime_counts_as_not_installed_and_is_replaced(fresh_install, monkeypatch):
+    """After a Python upgrade the old cp312 torch must not count as installed."""
+    root, weights = fresh_install
+    weights["cached"] = True
+    old = foundation_install.deps_dir()
+    _write_runtime(old, {**foundation_install.expected_stamp(), "python": "cpython-299"})
+    (old / "old_marker").write_text("")
+    assert foundation_install.packages_installed() is False
+    assert foundation_install.wire() is False and str(old) not in sys.path
+    st = foundation_install.status()
+    assert st["state"] == "not_installed" and "stale" in st["reason"]
+    assert foundation.available() is False
+
+    calls = []
+    monkeypatch.setattr(foundation_install.subprocess, "run", _fake_installer(weights, calls))
+    foundation_install.start()
+    foundation_install.wait(10)
+    assert foundation_install.status()["state"] == "ready"
+    assert len(calls) == 1  # reinstalled
+    assert not (old / "old_marker").exists()  # the stale folder was swapped out
+    assert not list((root / ".deps").glob("foundation.old-*"))
+
+
+def test_core_library_upgrade_also_invalidates_the_stamp(fresh_install, monkeypatch):
+    stamp = foundation_install.expected_stamp()
+    stamp["core"] = {**stamp["core"], "numpy": "0.0.1"}
+    _write_runtime(foundation_install.deps_dir(), stamp)
+    assert "core" in foundation_install.stamp_problem()
+
+
+def test_install_sweeps_orphans_and_never_replaces_a_valid_runtime(fresh_install, monkeypatch):
+    root, weights = fresh_install
+    deps = root / ".deps"
+    (deps / "foundation.tmp-killed").mkdir(parents=True)
+    (deps / "foundation.old-killed").mkdir(parents=True)
+    calls = []
+    monkeypatch.setattr(foundation_install.subprocess, "run", _fake_installer(weights, calls))
+    foundation_install._install_packages()
+    assert not list(deps.glob("foundation.tmp-*")) and not list(deps.glob("foundation.old-*"))
+    # A complete, matching runtime is left alone: no reinstall, no removal.
+    (foundation_install.deps_dir() / "keep").write_text("")
+    foundation_install._install_packages()
+    assert len(calls) == 1 and (foundation_install.deps_dir() / "keep").exists()
+
+
+def test_concurrent_installs_are_serialised_by_the_file_lock(fresh_install, monkeypatch):
+    """Two installers sharing one data root: the second waits on the lock, then
+    finds the first one's runtime valid and does nothing."""
+    _, weights = fresh_install
+    calls = []
+    monkeypatch.setattr(foundation_install.subprocess, "run",
+                        _fake_installer(weights, calls, delay=0.5))
+    errors = []
+
+    def worker():
+        try:
+            foundation_install._install_packages()
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert not errors and len(calls) == 1
+    assert foundation_install.stamp_problem() is None
+
+
+def test_checking_availability_never_touches_sys_path(fresh_install):
+    _, weights = fresh_install
+    weights["cached"] = True
+    _write_runtime(foundation_install.deps_dir(), foundation_install.expected_stamp())
+    before = list(sys.path)
+    assert foundation.available() is True
+    foundation.select_backend("auto", task="classification", n_rows=100, n_features=3, n_classes=2)
+    foundation_install.status()
+    assert sys.path == before
+
+
 def test_install_tool_reports_status_and_next_step(fresh_install, monkeypatch):
     monkeypatch.setattr(foundation_install, "start", lambda: {"state": "installing"})
     monkeypatch.setattr(foundation_install, "status", lambda: {"state": "installing"})
@@ -289,9 +401,9 @@ def test_wire_appends_the_runtime_folder_only_after_a_complete_install(fresh_ins
     target = foundation_install.deps_dir()
     target.mkdir(parents=True)
     (target / "meelu_wire_probe.py").write_text("VALUE = 42\n")
-    assert foundation_install.wire() is False  # no marker: half-installed is ignored
+    assert foundation_install.wire() is False  # no stamp: half-installed is ignored
     assert str(target) not in sys.path
-    (target / ".complete").write_text("")
+    (target / ".complete").write_text(json.dumps(foundation_install.expected_stamp()))
     assert foundation_install.wire() is True
     assert sys.path[-1] == str(target)  # appended: the core env still wins
     foundation_install.wire()
@@ -301,15 +413,48 @@ def test_wire_appends_the_runtime_folder_only_after_a_complete_install(fresh_ins
     sys.modules.pop("meelu_wire_probe", None)
 
 
+def test_weights_cache_lookup_follows_refs_main(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    repo = tmp_path / "models--jingang--TabICL"
+    assert foundation_install.weights_cached() is False
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text("abc123")
+    snap = repo / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / foundation_install.CLASSIFIER_CHECKPOINT).write_text("")
+    assert foundation_install.weights_cached() is False
+    (snap / foundation_install.REGRESSOR_CHECKPOINT).write_text("")
+    assert foundation_install.weights_cached() is True
+
+
 def test_install_command_uses_cpu_torch_on_linux(tmp_path, monkeypatch):
     monkeypatch.setattr(foundation_install.platform, "system", lambda: "Linux")
     monkeypatch.setattr(foundation_install, "_uv", lambda: "/usr/bin/uv")
     cmd = foundation_install.install_command(tmp_path / "t", tmp_path / "c.txt")
     assert cmd[:3] == ["/usr/bin/uv", "pip", "install"] and "--torch-backend" in cmd
+    assert "--extra-index-url" not in cmd  # uv's torch backend is preferred
     monkeypatch.setattr(foundation_install, "_uv", lambda: None)
     cmd = foundation_install.install_command(tmp_path / "t", tmp_path / "c.txt")
     assert cmd[1:4] == ["-m", "pip", "install"]
     assert "https://download.pytorch.org/whl/cpu" in cmd
+
+
+def test_explainers_decline_above_the_scoring_budget(tmp_path, monkeypatch):
+    """Too wide to explain within a call's CPU budget → an honest decline."""
+    from tabint.analysis.service.algorithms import interpretation, supervised
+    monkeypatch.setattr(shared_server, "_BASE", str(tmp_path))
+    rng = np.random.default_rng(3)
+    csv = tmp_path / "wide.csv"
+    pd.DataFrame({**{f"x{i}": rng.normal(size=200) for i in range(6)},
+                  "y": rng.integers(0, 2, 200)}).to_csv(csv, index=False)
+    key = _tool("create_session")(paths=[str(csv)])["session_key"]
+    _tool("train_classifier")(session_key=key, table="wide", target="y", backend="gbt")
+    monkeypatch.setattr(supervised.TrainedModel, "is_foundation", property(lambda self: True))
+    monkeypatch.setattr(interpretation, "_FOUNDATION_SCORED_ROWS", 40)
+    fi = _tool("feature_importance")(session_key=key, table="wide", model_name="y")
+    assert fi["declined"] is True and "CPU budget" in fi["trust"]["decline_reason"]
+    ex = _tool("explain_prediction")(session_key=key, table="wide", model_name="y")
+    assert ex["declined"] is True and "CPU budget" in ex["trust"]["decline_reason"]
 
 
 # --------------------------------------------------------------------------- #
@@ -398,3 +543,37 @@ def test_finetune_declines_above_the_row_cap(tabicl, churn, monkeypatch):
         session_key=churn, table="churn", target="churned", task="classification")
     assert out["declined"] is True
     assert "too many to fine-tune" in out["trust"]["decline_reason"]
+
+
+def test_selection_records_the_runtime(tabicl, churn):
+    out = _train(churn)
+    rt = out["metadata"]["backend_selection"]["foundation"]
+    assert rt["device"] == "cpu" and rt["n_estimators"] == foundation.N_ESTIMATORS_CPU
+    assert rt["checkpoints"]["classification"] == foundation_install.CLASSIFIER_CHECKPOINT
+    assert rt["tabicl_version"] and rt["torch_version"]
+
+
+def test_unloadable_saved_model_is_reported_then_recovers(tabicl, churn, tmp_path, monkeypatch):
+    """Reopening where the runtime is missing: session_info names the model and
+    the install hint; once it is back, the next use loads it."""
+    from tabint.analysis.db import persistence
+    from tabint.shared.server import _SESSIONS
+    _train(churn)
+    _SESSIONS.pop(churn, None)
+    monkeypatch.setattr(foundation_install, "wire", lambda: False)
+    info = _tool("session_info")(session_key=churn)
+    reason = info["unloaded_models"]["churn"]["churned"]
+    assert "install_foundation_model" in reason
+    with pytest.raises(LookupError, match="install_foundation_model"):
+        _tool("evaluate")(session_key=churn, table="churn", model_name="churned")
+    monkeypatch.undo()
+    monkeypatch.setattr(shared_server, "_BASE", str(tmp_path))
+    ev = _tool("evaluate")(session_key=churn, table="churn", model_name="churned")
+    assert ev["metadata"]["backend"] == "tabicl"
+
+
+def test_add_predictions_declines_above_the_scoring_cap(tabicl, churn, monkeypatch):
+    _train(churn)
+    monkeypatch.setattr(foundation, "PREDICT_MAX_ROWS", 100)
+    out = _tool("add_predictions")(session_key=churn, table="churn", model_name="churned")
+    assert out["declined"] is True and "minutes" in out["trust"]["decline_reason"]
